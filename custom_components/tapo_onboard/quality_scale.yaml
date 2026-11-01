@@ -1,0 +1,115 @@
+rules:
+  # Bronze
+  action-setup:
+    status: exempt
+    comment: No custom actions or services are registered.
+  appropriate-polling: done
+  brands: todo
+  common-modules: done
+  config-flow: done
+  config-flow-test-coverage:
+    status: todo
+    comment: config_flow.py is at 93% in the HA harness; needs 100%.
+  dependency-transparency:
+    status: todo
+    comment: tapolink-proto is Apache-2.0 but not yet on PyPI; it has no public CI or trusted publishing yet.
+  docs-actions:
+    status: exempt
+    comment: No custom actions or services are registered.
+  docs-high-level-description: done
+  docs-installation-instructions: todo
+  docs-removal-instructions: todo
+  entity-event-setup:
+    status: exempt
+    comment: Service integration with no entities; it onboards devices into core tplink.
+  entity-unique-id:
+    status: exempt
+    comment: Service integration with no entities; it onboards devices into core tplink.
+  has-entity-name:
+    status: exempt
+    comment: Service integration with no entities; it onboards devices into core tplink.
+  runtime-data: done
+  test-before-configure: done
+  test-before-setup:
+    status: exempt
+    comment: Setup does not need the cloud; the TP-Link devices keep working through core tplink. A failed inventory refresh is an UpdateFailed, and the entry stays loaded so devices are not affected.
+  unique-config-entry: done
+  docs-conditions:
+    status: exempt
+    comment: No conditions are provided.
+  docs-triggers:
+    status: exempt
+    comment: No triggers are provided.
+  # Silver
+  action-exceptions:
+    status: exempt
+    comment: No custom actions or services are registered.
+  config-entry-unloading: done
+  docs-configuration-parameters:
+    status: exempt
+    comment: There is no options flow; the only parameters are the account credentials entered at setup.
+  docs-installation-parameters: todo
+  entity-unavailable:
+    status: exempt
+    comment: Service integration with no entities; it onboards devices into core tplink.
+  integration-owner: done
+  log-when-unavailable: done
+  parallel-updates:
+    status: exempt
+    comment: No entity platforms; the single cloud coordinator does not run entity updates.
+  reauthentication-flow: done
+  test-coverage:
+    status: todo
+    comment: Measured 95% overall, but config_flow.py is 93% and coordinator.py is 94%; the rule needs more than 95% per module.
+  # Gold
+  devices:
+    status: exempt
+    comment: Service integration with no entities or devices; it onboards devices into core tplink.
+  diagnostics: done
+  discovery:
+    status: exempt
+    comment: The cloud inventory is not HA discovery. Network discovery of devices is done by core tplink, which this helper triggers through its DHCP flow.
+  discovery-update-info:
+    status: exempt
+    comment: Devices and their addresses belong to core tplink, which updates host info from its own discovery; this integration stores no device host.
+  docs-data-update: todo
+  docs-examples: todo
+  docs-known-limitations: done
+  docs-supported-devices: todo
+  docs-supported-functions:
+    status: exempt
+    comment: No entities or actions; the only function is the onboarding flow, covered in the README.
+  docs-troubleshooting: todo
+  docs-use-cases: todo
+  dynamic-devices:
+    status: done
+    comment: There are no devices of its own, but new devices appearing in the cloud account are onboarded into core tplink automatically by the inventory coordinator.
+  entity-category:
+    status: exempt
+    comment: Service integration with no entities or devices; it onboards devices into core tplink.
+  entity-device-class:
+    status: exempt
+    comment: Service integration with no entities or devices; it onboards devices into core tplink.
+  entity-disabled-by-default:
+    status: exempt
+    comment: Service integration with no entities or devices; it onboards devices into core tplink.
+  entity-translations:
+    status: exempt
+    comment: Service integration with no entities or devices; it onboards devices into core tplink.
+  exception-translations: done
+  icon-translations:
+    status: exempt
+    comment: Service integration with no entities or devices; it onboards devices into core tplink.
+  reconfiguration-flow:
+    status: exempt
+    comment: The only configuration is the account credentials, which are renewed by the reauthentication flow; there is nothing else to reconfigure.
+  repair-issues:
+    status: exempt
+    comment: No actionable user-fixable problems are raised; credential problems start the reauthentication flow and onboarding results are shown in the flow.
+  stale-devices:
+    status: exempt
+    comment: Service integration with no entities or devices; it onboards devices into core tplink.
+  # Platinum
+  async-dependency: done
+  inject-websession: done
+  strict-typing: done

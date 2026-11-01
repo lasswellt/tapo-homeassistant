@@ -1,0 +1,77 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Sign in to TP-Link cloud",
+        "description": "Sign in with your TP-Link/Tapo account. The password is only used to add your devices to TP-Link Smart Home and is not stored in the config entry.",
+        "data": {
+          "username": "Email",
+          "password": "Password"
+        },
+        "data_description": {
+          "username": "The email address of your TP-Link/Tapo account.",
+          "password": "The password of your TP-Link/Tapo account."
+        }
+      },
+      "mfa": {
+        "title": "Verification code",
+        "description": "TP-Link emailed a 6-digit code to {email}.",
+        "data": {
+          "code": "Code"
+        },
+        "data_description": {
+          "code": "The 6-digit verification code from the email."
+        }
+      },
+      "reauth_confirm": {
+        "title": "Sign in to TP-Link cloud again",
+        "description": "Your TP-Link Smart Home devices keep working; the password is only needed to find new devices and fix changed addresses. Enter the password for {username}.",
+        "data": {
+          "password": "Password"
+        },
+        "data_description": {
+          "password": "The password of your TP-Link/Tapo account."
+        }
+      },
+      "pick_devices": {
+        "title": "Choose devices",
+        "description": "Ticked devices are added to TP-Link Smart Home. Unticked devices are ignored.",
+        "data": {
+          "devices": "Devices"
+        },
+        "data_description": {
+          "devices": "The devices to add to TP-Link Smart Home."
+        }
+      }
+    },
+    "progress": {
+      "onboarding": "Adding your devices to TP-Link Smart Home."
+    },
+    "error": {
+      "cannot_connect": "Cannot reach the TP-Link cloud. Try again later.",
+      "invalid_auth": "Invalid email or password.",
+      "rate_limited": "Too many attempts. Try again in {minutes} minutes.",
+      "unknown": "Unexpected error.",
+      "invalid_code": "The code must be 6 digits."
+    },
+    "abort": {
+      "already_configured": "This account is already configured.",
+      "wrong_account": "Sign in with the same TP-Link account that was originally configured.",
+      "reauth_successful": "[%key:common::config_flow::abort::reauth_successful%]"
+    },
+    "create_entry": {
+      "default": "Added: {added}. Needs your confirmation: {confirm}. Already configured: {already}. Failed: {failed}."
+    }
+  },
+  "exceptions": {
+    "cloud_auth": {
+      "message": "Your TP-Link Smart Home devices keep working. The TP-Link cloud rejected the stored sign-in; reauthenticate to resume the inventory."
+    },
+    "rate_limited": {
+      "message": "Your TP-Link Smart Home devices keep working. The TP-Link cloud rate-limited requests; retrying later."
+    },
+    "cloud_unavailable": {
+      "message": "Your TP-Link Smart Home devices keep working. The TP-Link cloud is unreachable; retrying later."
+    }
+  }
+}
