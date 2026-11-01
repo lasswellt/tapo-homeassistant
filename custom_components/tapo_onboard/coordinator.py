@@ -20,10 +20,10 @@ from tapolink_proto.cloud import (
     CloudAuthError,
     CloudClient,
     CloudDevice,
+    CloudError,
     CloudRateLimited,
     CloudResponseError,
     CloudSession,
-    CloudUnavailable,
     DeviceDetails,
     TokenExpired,
 )
@@ -48,6 +48,15 @@ from .onboarding import (
 )
 
 _BROKEN_STATES = frozenset({ConfigEntryState.SETUP_RETRY, ConfigEntryState.SETUP_ERROR})
+_TERMINAL = frozenset(
+    {
+        OnboardOutcome.ADDED,
+        OnboardOutcome.ALREADY_CONFIGURED,
+        OnboardOutcome.HANDED_TO_USER,
+        OnboardOutcome.AUTH_FAILED,
+        OnboardOutcome.IDENTITY_MISMATCH,
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,7 +116,11 @@ class InventoryCoordinator(DataUpdateCoordinator[InventoryState]):
             try:
                 return await call(self._session)
             except TokenExpired:
-                self._session = await self._client.refresh(self._session)
+                try:
+                    self._session = await self._client.refresh(self._session)
+                except CloudResponseError as exc:
+                    # No refresh token / none returned: credentials unusable.
+                    raise self._start_reauth() from exc
                 self.hass.config_entries.async_update_entry(
                     self._entry,
                     data={
@@ -125,7 +138,9 @@ class InventoryCoordinator(DataUpdateCoordinator[InventoryState]):
         """Fetch details; a per-device failure skips only that device."""
         try:
             return await self._call(lambda s: self._client.device_details(s, device))
-        except (CloudUnavailable, CloudResponseError) as exc:
+        except CloudRateLimited:
+            raise
+        except CloudError as exc:
             LOGGER.debug("details for %s failed: %s", device.mac, type(exc).__name__)
             return None
 
@@ -142,7 +157,7 @@ class InventoryCoordinator(DataUpdateCoordinator[InventoryState]):
                 translation_key="rate_limited",
                 retry_after=exc.retry_after,
             ) from exc
-        except (CloudUnavailable, CloudResponseError) as exc:
+        except CloudError as exc:
             raise UpdateFailed(
                 translation_domain=DOMAIN, translation_key="cloud_unavailable"
             ) from exc
@@ -182,7 +197,6 @@ class InventoryCoordinator(DataUpdateCoordinator[InventoryState]):
             details = await self._details(device)
             if details is None:
                 continue
-            self._attempted.add(mac)
             if not details.ip:
                 LOGGER.debug("no IP for new device %s, skipping", mac)
                 continue
@@ -196,15 +210,19 @@ class InventoryCoordinator(DataUpdateCoordinator[InventoryState]):
                     username=self._username,
                     password=password,
                 )
+                if outcomes[mac] in _TERMINAL:
+                    self._attempted.add(mac)
             else:
                 identity = await async_verify_identity(
                     self.hass, host=details.ip, mac=mac, device_id=device.device_id
                 )
                 if identity is IdentityResult.MISMATCH:
                     outcomes[mac] = OnboardOutcome.IDENTITY_MISMATCH
+                    self._attempted.add(mac)
                     continue
                 async_request_host_update(self.hass, host=details.ip, mac=mac)
                 outcomes[mac] = OnboardOutcome.HANDED_TO_USER
+                self._attempted.add(mac)
 
         return InventoryState(
             devices=devices, outcomes=outcomes, host_updates=tuple(host_updates)
