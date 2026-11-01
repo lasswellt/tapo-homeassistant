@@ -19,6 +19,7 @@ from typing import Any, Final
 TDP_PORT: Final = 20002
 TDP_HEADER_SIZE: Final = 16
 _RESEND_INTERVAL: Final = 0.5
+_MAX_REPLY_SIZE: Final = 8192
 _HEX12 = re.compile(r"[0-9a-f]{12}")
 
 
@@ -129,21 +130,27 @@ def _is_int(value: object) -> bool:
 
 
 class _Protocol(asyncio.DatagramProtocol):
-    def __init__(self, future: asyncio.Future[bytes]) -> None:
+    def __init__(self, future: asyncio.Future[TdpInfo]) -> None:
         self._future = future
 
     def datagram_received(self, data: bytes, addr: tuple[str | Any, ...]) -> None:
-        if len(data) > TDP_HEADER_SIZE and not self._future.done():
-            self._future.set_result(data)
+        """Complete the future only with a reply that parses to TdpInfo."""
+        if self._future.done():
+            return
+        info = _parse(data)
+        if info is not None:
+            self._future.set_result(info)
 
     def error_received(self, exc: Exception) -> None:
         """Ignore ICMP errors (e.g. refused); keep waiting until timeout."""
 
 
 def _parse(data: bytes) -> TdpInfo | None:
+    if not TDP_HEADER_SIZE < len(data) <= _MAX_REPLY_SIZE:
+        return None
     try:
         body = json.loads(data[TDP_HEADER_SIZE:].decode())
-    except (UnicodeDecodeError, ValueError):
+    except (UnicodeDecodeError, ValueError, RecursionError):
         return None
     if not isinstance(body, dict):
         return None
@@ -163,10 +170,10 @@ async def async_probe(
     """Unicast a TDP probe to ``host``, resending every ~0.5 s until timeout.
 
     The socket is connected to ``host:port`` so the kernel drops datagrams from
-    any other source. Returns None on timeout, malformed reply or OSError.
+    any other source. Returns None on timeout, or OSError; junk datagrams are ignored.
     """
     loop = asyncio.get_running_loop()
-    future: asyncio.Future[bytes] = loop.create_future()
+    future: asyncio.Future[TdpInfo] = loop.create_future()
     try:
         transport, _ = await loop.create_datagram_endpoint(
             lambda: _Protocol(future), remote_addr=(host, port)
@@ -178,12 +185,11 @@ async def async_probe(
         while (remaining := deadline - loop.time()) > 0:
             transport.sendto(query)
             try:
-                data = await asyncio.wait_for(
+                return await asyncio.wait_for(
                     asyncio.shield(future), min(_RESEND_INTERVAL, remaining)
                 )
             except TimeoutError:
                 continue
-            return _parse(data)
         return None
     except OSError:
         return None

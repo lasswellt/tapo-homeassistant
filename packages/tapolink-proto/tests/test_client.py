@@ -218,3 +218,23 @@ async def test_http_500(mocked: aioresponses, client: CloudClient) -> None:
     mocked.post(url("api/v2/account/login"), status=500, body="boom")
     with pytest.raises(CloudResponseError):
         await client.login("a@b.c", "pw")
+
+
+async def test_non_numeric_error_code_post(
+    mocked: aioresponses, client: CloudClient
+) -> None:
+    mocked.post(url("api/v2/account/login"), payload={"error_code": "abc", "msg": "x"})
+    with pytest.raises(CloudResponseError):
+        await client.login("a@b.c", "pw")
+
+
+async def test_non_numeric_error_code_device_details(
+    mocked: aioresponses, client: CloudClient
+) -> None:
+    dev = CloudDevice.from_api(device(1))
+    mocked.get(
+        "https://use1-app-server.iot.i.tplinknbu.com/v1/things/0000000000000000000000000000000000000001/details",
+        payload={"error_code": "abc"},
+    )
+    with pytest.raises(CloudResponseError):
+        await client.device_details(SESSION, dev)

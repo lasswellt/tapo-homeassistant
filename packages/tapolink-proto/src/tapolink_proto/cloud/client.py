@@ -54,6 +54,14 @@ DEVICE_TYPES = [
 ]
 
 
+def _error_code(data: dict[str, Any]) -> int:
+    """Return the numeric ``error_code`` (0 if absent); non-numeric is an error."""
+    try:
+        return int(data.get("error_code", 0))
+    except (ValueError, TypeError, OverflowError) as exc:
+        raise CloudResponseError("non-numeric error_code in response") from exc
+
+
 @dataclass(frozen=True, slots=True)
 class CloudSession:
     """Credentials-free token bundle; callers hold it and pass it in."""
@@ -117,9 +125,7 @@ class CloudClient:
             raise CloudResponseError(f"unexpected response shape from {path}")
         result = data.get("result")
         result = result if isinstance(result, dict) else {}
-        raise_for_error_code(
-            int(data.get("error_code", 0)), data.get("msg", ""), result
-        )
+        raise_for_error_code(_error_code(data), data.get("msg", ""), result)
         return result
 
     @staticmethod
@@ -250,7 +256,5 @@ class CloudClient:
         data = await self._request("GET", url, headers=headers)
         if not isinstance(data, dict):
             raise CloudResponseError("unexpected details response shape")
-        raise_for_error_code(
-            int(data.get("error_code", 0)), str(data.get("msg", "")), data
-        )
+        raise_for_error_code(_error_code(data), str(data.get("msg", "")), data)
         return DeviceDetails.from_api(data)

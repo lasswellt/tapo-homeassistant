@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 from tapolink_proto.discovery import TdpInfo, async_probe, build_query
+from tapolink_proto.discovery.tdp import _parse
 
 pytestmark = pytest.mark.usefixtures("socket_enabled")
 
@@ -130,6 +131,54 @@ async def test_missing_device_id_returns_none(query: bytes) -> None:
     try:
         assert (
             await async_probe("127.0.0.1", query=query, port=port, timeout=1.0) is None
+        )
+    finally:
+        transport.close()
+
+
+async def _serve_many(replies: list[bytes]) -> tuple[asyncio.BaseTransport, int]:
+    class _Multi(_Responder):
+        def datagram_received(self, data: bytes, addr: Any) -> None:
+            assert self.transport is not None
+            for reply in replies:
+                self.transport.sendto(reply, addr)
+
+    loop = asyncio.get_running_loop()
+    transport, _ = await loop.create_datagram_endpoint(
+        lambda: _Multi(None), local_addr=("127.0.0.1", 0)
+    )
+    return transport, int(transport.get_extra_info("sockname")[1])
+
+
+async def test_junk_then_valid_reply(query: bytes) -> None:
+    valid = _frame(json.dumps({"error_code": 0, "result": RESULT}).encode())
+    transport, port = await _serve_many([b"junk", _frame(b"{not json"), valid])
+    try:
+        info = await async_probe("127.0.0.1", query=query, port=port, timeout=2.0)
+    finally:
+        transport.close()
+    assert isinstance(info, TdpInfo)
+    assert info.mac == "aa:bb:cc:dd:ee:ff"
+
+
+async def test_deeply_nested_json_returns_none(query: bytes) -> None:
+    transport, port = await _serve(_frame(b"[" * 6000))
+    try:
+        assert (
+            await async_probe("127.0.0.1", query=query, port=port, timeout=0.8) is None
+        )
+    finally:
+        transport.close()
+    assert _parse(_frame(b"[" * 60000)) is None
+
+
+async def test_oversize_reply_returns_none(query: bytes) -> None:
+    body = json.dumps({"result": RESULT, "pad": "x" * 9000}).encode()
+    assert _parse(_frame(body)) is None
+    transport, port = await _serve(_frame(body))
+    try:
+        assert (
+            await async_probe("127.0.0.1", query=query, port=port, timeout=0.8) is None
         )
     finally:
         transport.close()
