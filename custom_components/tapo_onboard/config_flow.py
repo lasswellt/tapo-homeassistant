@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable, Mapping
 from enum import StrEnum
 from typing import Any
 from uuid import uuid4
@@ -79,6 +80,7 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
         self._ignored: list[str] = []
         self._outcomes: dict[str, OnboardOutcome] = {}
         self._task: asyncio.Task[None] | None = None
+        self._reauth = False
 
     @staticmethod
     def _error(err: Exception) -> tuple[str, dict[str, str]]:
@@ -124,6 +126,11 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
         self._password = user_input[CONF_PASSWORD]
         await self.async_set_unique_id(self._username.lower())
         self._abort_if_unique_id_configured(reload_on_update=False)
+        return await self._sign_in(self._user_form)
+
+    async def _sign_in(
+        self, show_form: Callable[[dict[str, str], dict[str, str]], ConfigFlowResult]
+    ) -> ConfigFlowResult:
         ssl_ctx = await self.hass.async_add_executor_job(build_cloud_ssl_context)
         self._client = CloudClient(
             async_get_clientsession(self.hass),
@@ -138,11 +145,11 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
                 await self._client.request_mfa_code(self._username, self._password)
             except Exception as mfa_err:  # noqa: BLE001 - mapped to a form error
                 key, ph = self._error(mfa_err)
-                return self._user_form({"base": key}, ph)
+                return show_form({"base": key}, ph)
             return await self.async_step_mfa()
         except Exception as err:  # noqa: BLE001 - mapped to a form error
             key, ph = self._error(err)
-            return self._user_form({"base": key}, ph)
+            return show_form({"base": key}, ph)
         return await self._after_login()
 
     async def async_step_mfa(
@@ -174,6 +181,8 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
         )
 
     async def _after_login(self) -> ConfigFlowResult:
+        if self._reauth:
+            return await self._finish_reauth()
         assert self._client is not None and self._session is not None  # noqa: S101
         try:
             self._devices = await self._client.list_devices(self._session)
@@ -181,6 +190,58 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
             key, ph = self._error(err)
             return self._user_form({"base": key}, ph)
         return await self.async_step_pick_devices()
+
+    def _reauth_form(
+        self, errors: dict[str, str], ph: dict[str, str]
+    ) -> ConfigFlowResult:
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_PASSWORD): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.PASSWORD)
+                    )
+                }
+            ),
+            errors=errors,
+            description_placeholders={**ph, "username": self._username},
+        )
+
+    async def async_step_reauth(
+        self, entry_data: Mapping[str, Any]
+    ) -> ConfigFlowResult:
+        """Start reauth after the coordinator lost the cloud sign-in."""
+        entry = self._get_reauth_entry()
+        self._reauth = True
+        self._username = str(entry.data[CONF_USERNAME])
+        self._terminal_uuid = str(entry.data[CONF_TERMINAL_UUID])
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Re-collect the password and refresh the stored tokens."""
+        if user_input is None:
+            return self._reauth_form({}, {"minutes": ""})
+        self._password = user_input[CONF_PASSWORD]
+        return await self._sign_in(self._reauth_form)
+
+    async def _finish_reauth(self) -> ConfigFlowResult:
+        assert self._session is not None  # noqa: S101 - set by login
+        unique_id = self._username.lower()
+        await self.async_set_unique_id(unique_id)
+        self._abort_if_unique_id_mismatch(reason="wrong_account")
+        self.hass.data.setdefault(DOMAIN, {}).setdefault(DATA_PENDING_PASSWORD, {})[
+            unique_id
+        ] = self._password
+        return self.async_update_and_abort(
+            self._get_reauth_entry(),
+            data_updates={
+                CONF_TOKEN: self._session.token,
+                CONF_REFRESH_TOKEN: self._session.refresh_token,
+                CONF_ACCOUNT_ID: self._session.account_id,
+            },
+        )
 
     def _classify(self, device: CloudDevice) -> _Kind:
         if async_tplink_entry_for_mac(self.hass, device.mac) is not None:

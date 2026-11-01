@@ -23,6 +23,16 @@
           "code": "The 6-digit verification code from the email."
         }
       },
+      "reauth_confirm": {
+        "title": "Sign in to TP-Link cloud again",
+        "description": "Your TP-Link Smart Home devices keep working; the password is only needed to find new devices and fix changed addresses. Enter the password for {username}.",
+        "data": {
+          "password": "Password"
+        },
+        "data_description": {
+          "password": "The password of your TP-Link/Tapo account."
+        }
+      },
       "pick_devices": {
         "title": "Choose devices",
         "description": "Ticked devices are added to TP-Link Smart Home. Unticked devices are ignored.",
@@ -46,7 +56,9 @@
       "invalid_code": "The code must be 6 digits."
     },
     "abort": {
-      "already_configured": "This account is already configured."
+      "already_configured": "This account is already configured.",
+      "wrong_account": "Sign in with the same TP-Link account that was originally configured.",
+      "reauth_successful": "[%key:common::config_flow::abort::reauth_successful%]"
     },
     "create_entry": {
       "default": "Added: {added}. Needs your confirmation: {confirm}. Already configured: {already}. Failed: {failed}."
