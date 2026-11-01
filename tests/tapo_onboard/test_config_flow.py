@@ -318,6 +318,7 @@ async def test_onboarding_device_failure_still_creates_entry(
     assert ph is not None
     assert ph["added"] == "1"
     assert ph["failed"] == "1"
+    assert ph["failed_devices"] == " (Bravo)"
 
 
 async def test_onboarding_cancelled_marks_unreached_failed(
@@ -336,6 +337,7 @@ async def test_onboarding_cancelled_marks_unreached_failed(
     assert ph is not None
     assert ph["added"] == "1"
     assert ph["failed"] == "2"
+    assert ph["failed_devices"] == " (Bravo, Charlie)"
 
 
 async def _run(hass: HomeAssistant, macs: list[str]) -> ConfigFlowResult:
@@ -361,6 +363,7 @@ async def test_three_devices_added_card_and_no_ip(
         "confirm": "1",
         "already": "0",
         "failed": "1",
+        "failed_devices": " (Charlie)",
     }
     tplink = hass.config_entries.async_entries("tplink")
     assert [e.unique_id for e in tplink] == [format_mac(STUB_MAC)]
@@ -386,6 +389,7 @@ async def test_identity_mismatch_starts_no_flow(
     ph = result["description_placeholders"]
     assert ph is not None
     assert (ph["added"], ph["failed"], ph["confirm"]) == ("1", "1", "0")
+    assert ph["failed_devices"] == " (Bravo)"
     tplink = hass.config_entries.async_entries("tplink")
     assert [e.unique_id for e in tplink] == [format_mac(STUB_MAC)]
     assert not hass.config_entries.flow.async_progress_by_handler("tplink")
@@ -403,6 +407,7 @@ async def test_ticked_device_already_in_tplink_is_skipped(
         "confirm": "0",
         "already": "1",
         "failed": "0",
+        "failed_devices": "",
     }
     assert fake_cloud.details_calls == [STUB_MAC]
     tplink = hass.config_entries.async_entries("tplink")
@@ -419,6 +424,7 @@ async def test_cannot_connect_counts_failed(hass: HomeAssistant) -> None:
         "confirm": "0",
         "already": "0",
         "failed": "1",
+        "failed_devices": " (Alpha)",
     }
     assert not hass.config_entries.async_entries("tplink")
 
@@ -432,4 +438,5 @@ async def test_auth_failed_counts_under_confirm(hass: HomeAssistant) -> None:
         "confirm": "1",
         "already": "0",
         "failed": "0",
+        "failed_devices": "",
     }

@@ -54,8 +54,9 @@ Home Assistant's core `tplink` integration controls the devices.
 - Drives core `tplink`'s add-device flow for the ones you pick, passing the IP and
   your credentials, so you never type an IP. The hand-off, and any "Discovered" card,
   happen only after the device answers an identity probe.
-- Every 30 minutes it re-reads the list. It repairs the IP of `tplink` entries stuck
-  in setup retry/error, and onboards newly added devices.
+- Every 30 minutes it re-reads the list. It repairs the IP of lost `tplink` entries
+  (stuck in setup retry/error, or loaded with every entity unavailable), and onboards
+  newly added devices.
 
 **Install.** Copy `custom_components/tapo_onboard` into your `custom_components/`
 directory, or add this repository as a HACS custom repository. The integration needs
@@ -71,7 +72,8 @@ this repository.
 3. Tick the devices to onboard. Each is labelled: ready / works partly in TP-Link
    Smart Home / not supported by TP-Link Smart Home / already in TP-Link Smart Home.
    Only "ready" devices start ticked.
-4. Wait for the progress step; the devices appear under TP-Link Smart Home.
+4. Wait for the progress step; the devices appear under TP-Link Smart Home. The
+   summary names any device that failed (for example, one that is offline).
 
 **Support in core `tplink`** (tested on the maintainer's devices, 2026-11-01):
 
@@ -84,9 +86,12 @@ this repository.
 **Stored:** the refresh token and terminal UUID only. The password is never stored;
 it is held in memory during setup.
 
-**IP upkeep:** the 30-minute poll calls `device_details` only for `tplink` entries in
-setup retry/error and for new devices, and requests a host update through core's DHCP
-flow.
+**IP upkeep:** the 30-minute poll calls `device_details` only for lost `tplink`
+entries and for new devices, at most once per device per 15 minutes. An entry is lost
+when it is in setup retry/error, or when it is loaded and every enabled entity is
+unavailable (the device moved or is off). If the cloud reports a different IP and the
+device there answers the identity probe, it requests a host update through core's DHCP
+flow; core rewrites the host and reloads the entry.
 
 **Limitations.**
 

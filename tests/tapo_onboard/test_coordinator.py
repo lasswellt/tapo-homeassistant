@@ -17,7 +17,9 @@ from unittest.mock import patch
 import pytest
 from freezegun.api import FrozenDateTimeFactory
 from homeassistant.config_entries import SOURCE_DHCP, ConfigEntryState
+from homeassistant.const import STATE_ON, STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import format_mac
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -196,6 +198,94 @@ async def test_setup_error_same_ip_no_update(
     assert coord.data.host_updates == ()
 
 
+def _entity(
+    hass: HomeAssistant,
+    tp: MockConfigEntry,
+    key: str,
+    state: str | None,
+    *,
+    disabled: bool = False,
+) -> None:
+    ent = er.async_get(hass).async_get_or_create(
+        "switch",
+        "tplink",
+        key,
+        config_entry=tp,
+        disabled_by=er.RegistryEntryDisabler.USER if disabled else None,
+    )
+    if state is not None:
+        hass.states.async_set(ent.entity_id, state)
+
+
+async def test_loaded_entry_all_unavailable_repaired(
+    hass: HomeAssistant, mod: ModuleType, stub: type[StubTplinkFlow]
+) -> None:
+    tp = _tplink(hass, ConfigEntryState.LOADED)
+    _entity(hass, tp, "a", STATE_UNAVAILABLE)
+    _entity(hass, tp, "b", STATE_UNAVAILABLE)
+    _entity(hass, tp, "c", None, disabled=True)
+    client = FakeCloudClient([_device(STUB_MAC)], {STUB_MAC: "10.0.0.9"})
+    coord = _coord(mod, hass, _entry(hass), client)
+    await coord.async_refresh()
+    await hass.async_block_till_done()
+    assert client.details_calls == [STUB_MAC]
+    assert coord.data.host_updates == (STUB_MAC,)
+    assert [i.ip for i in stub.dhcp_infos] == ["10.0.0.9"]
+    assert tp.data["host"] == "10.0.0.9"
+
+
+@pytest.mark.parametrize(
+    "states",
+    [
+        [STATE_UNAVAILABLE, STATE_ON],
+        [STATE_UNAVAILABLE, None],
+    ],
+    ids=["one-available", "one-not-yet-added"],
+)
+async def test_loaded_entry_partly_available_not_lost(
+    hass: HomeAssistant,
+    mod: ModuleType,
+    stub: type[StubTplinkFlow],
+    states: list[str | None],
+) -> None:
+    tp = _tplink(hass, ConfigEntryState.LOADED)
+    for i, state in enumerate(states):
+        _entity(hass, tp, str(i), state)
+    client = FakeCloudClient([_device(STUB_MAC)], {STUB_MAC: "10.0.0.9"})
+    coord = _coord(mod, hass, _entry(hass), client)
+    await coord.async_refresh()
+    assert client.details_calls == []
+    assert tp.data["host"] == "10.0.0.1"
+
+
+async def test_loaded_entry_only_disabled_entities_not_lost(
+    hass: HomeAssistant, mod: ModuleType, stub: type[StubTplinkFlow]
+) -> None:
+    tp = _tplink(hass, ConfigEntryState.LOADED)
+    _entity(hass, tp, "a", STATE_UNAVAILABLE, disabled=True)
+    client = FakeCloudClient([_device(STUB_MAC)], {STUB_MAC: "10.0.0.9"})
+    coord = _coord(mod, hass, _entry(hass), client)
+    await coord.async_refresh()
+    assert client.details_calls == []
+
+
+@pytest.mark.parametrize(
+    "state", [ConfigEntryState.NOT_LOADED, ConfigEntryState.SETUP_IN_PROGRESS]
+)
+async def test_other_states_not_lost(
+    hass: HomeAssistant,
+    mod: ModuleType,
+    stub: type[StubTplinkFlow],
+    state: ConfigEntryState,
+) -> None:
+    tp = _tplink(hass, state)
+    _entity(hass, tp, "a", STATE_UNAVAILABLE)
+    client = FakeCloudClient([_device(STUB_MAC)], {STUB_MAC: "10.0.0.9"})
+    coord = _coord(mod, hass, _entry(hass), client)
+    await coord.async_refresh()
+    assert client.details_calls == []
+
+
 async def test_new_device_with_password_added(
     hass: HomeAssistant, mod: ModuleType, stub: type[StubTplinkFlow]
 ) -> None:
@@ -364,6 +454,25 @@ async def test_ip_repair_unverified_skipped(
     with _probe_returns(info):
         state = await _coord(mod, hass, _entry(hass), client)._async_update_data()
     await hass.async_block_till_done()
+    assert state.host_updates == ()
+    assert tp.data["host"] == "10.0.0.1"
+    assert stub.dhcp_infos == []
+
+
+@pytest.mark.parametrize("info", [_tdp("other-device"), None])
+async def test_loaded_lost_unverified_skipped(
+    hass: HomeAssistant,
+    mod: ModuleType,
+    stub: type[StubTplinkFlow],
+    info: TdpInfo | None,
+) -> None:
+    tp = _tplink(hass, ConfigEntryState.LOADED)
+    _entity(hass, tp, "a", STATE_UNAVAILABLE)
+    client = FakeCloudClient([_device(STUB_MAC)], {STUB_MAC: "10.0.0.9"})
+    with _probe_returns(info):
+        state = await _coord(mod, hass, _entry(hass), client)._async_update_data()
+    await hass.async_block_till_done()
+    assert client.details_calls == [STUB_MAC]
     assert state.host_updates == ()
     assert tp.data["host"] == "10.0.0.1"
     assert stub.dhcp_infos == []

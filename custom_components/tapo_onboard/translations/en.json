@@ -60,7 +60,7 @@
       "reauth_successful": "[%key:common::config_flow::abort::reauth_successful%]"
     },
     "create_entry": {
-      "default": "Added: {added}. Needs your confirmation: {confirm}. Already configured: {already}. Failed: {failed}."
+      "default": "Added: {added}. Needs your confirmation: {confirm}. Already configured: {already}. Failed: {failed}{failed_devices}."
     }
   },
   "exceptions": {

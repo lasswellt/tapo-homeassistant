@@ -55,6 +55,14 @@ from .const import (
 from .coordinator import FlowResult
 from .onboarding import OnboardOutcome, async_onboard_device, async_tplink_entry_for_mac
 
+_FAILED = frozenset(
+    {
+        OnboardOutcome.CANNOT_CONNECT,
+        OnboardOutcome.UNAVAILABLE,
+        OnboardOutcome.IDENTITY_MISMATCH,
+    }
+)
+
 CONF_CODE = "code"
 CONF_DEVICES = "devices"
 
@@ -367,11 +375,12 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
             OnboardOutcome.AUTH_FAILED
         )
         already = outcomes.count(OnboardOutcome.ALREADY_CONFIGURED)
-        failed = (
-            outcomes.count(OnboardOutcome.CANNOT_CONNECT)
-            + outcomes.count(OnboardOutcome.UNAVAILABLE)
-            + outcomes.count(OnboardOutcome.IDENTITY_MISMATCH)
+        failed = sum(1 for o in outcomes if o in _FAILED)
+        failed_names = sorted(
+            (d.alias for d in self._devices if self._outcomes.get(d.mac) in _FAILED),
+            key=str.lower,
         )
+        failed_devices = f" ({', '.join(failed_names)})" if failed_names else ""
         return self.async_create_entry(
             title=unique_id,
             data={
@@ -387,5 +396,6 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
                 "confirm": str(confirm),
                 "already": str(already),
                 "failed": str(failed),
+                "failed_devices": failed_devices,
             },
         )

@@ -4,9 +4,10 @@
 """Cloud inventory coordinator.
 
 Fixed cadence: `timedelta(minutes=30)` (`INVENTORY_INTERVAL`), one
-`list_devices` call per cycle. `device_details` is only called for `tplink`
-entries that failed to set up (IP repair) and for devices not yet seen, and at
-most once per device per 15 minutes (`DETAILS_FLOOR`).
+`list_devices` call per cycle. `device_details` is only called for lost `tplink`
+entries (failed to set up, or loaded with every enabled entity unavailable) and
+for devices not yet seen, and at most once per device per 15 minutes
+(`DETAILS_FLOOR`).
 """
 
 from __future__ import annotations
@@ -16,7 +17,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
+from homeassistant.const import STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 from tapolink_proto.cloud import (
@@ -156,6 +159,32 @@ class InventoryCoordinator(DataUpdateCoordinator[InventoryState]):
         except (TokenExpired, CloudAuthError) as exc:
             raise self._start_reauth() from exc
 
+    def _is_lost(self, tplink_entry: ConfigEntry) -> bool:
+        """Return True when the `tplink` entry cannot reach its device.
+
+        Failed setup counts as lost. A loaded entry is lost when it has enabled
+        entities and every one of them is unavailable (device moved or off).
+        """
+        if tplink_entry.state in _BROKEN_STATES:
+            return True
+        if tplink_entry.state is not ConfigEntryState.LOADED:
+            return False
+        registry = er.async_get(self.hass)
+        entity_ids = [
+            ent.entity_id
+            for ent in er.async_entries_for_config_entry(
+                registry, tplink_entry.entry_id
+            )
+            if ent.disabled_by is None
+        ]
+        if not entity_ids:
+            return False
+        for entity_id in entity_ids:
+            state = self.hass.states.get(entity_id)
+            if state is None or state.state != STATE_UNAVAILABLE:
+                return False
+        return True
+
     async def _details(self, device: CloudDevice) -> DeviceDetails | None:
         """Fetch details; a per-device failure skips only that device.
 
@@ -201,8 +230,9 @@ class InventoryCoordinator(DataUpdateCoordinator[InventoryState]):
         for mac, device in devices.items():
             tplink_entry = async_tplink_entry_for_mac(self.hass, mac)
             if tplink_entry is not None:
-                # Case (a): IP repair for entries that failed to set up.
-                if tplink_entry.state not in _BROKEN_STATES:
+                # Case (a): IP repair for lost entries. Core rewrites the host
+                # and reloads for both loaded and setup-retry/error entries.
+                if not self._is_lost(tplink_entry):
                     continue
                 details = await self._details(device)
                 if details is None or not details.ip:
