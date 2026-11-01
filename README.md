@@ -43,9 +43,66 @@ Control never goes through the cloud.
 
 Both are Apache-2.0 licensed and contain no GPL code.
 
+## tapo_onboard: use it today with TP-Link Smart Home
+
+`custom_components/tapo_onboard` ("Tapo Cloud Onboarding for TP-Link Smart Home",
+domain `tapo_onboard`) is a small helper, not a replacement. The cloud finds the IPs;
+Home Assistant's core `tplink` integration controls the devices.
+
+- Logs in to the TP-Link cloud (with MFA if enabled) and lists your devices with
+  their LAN IPs.
+- Drives core `tplink`'s add-device flow for the ones you pick, passing the IP and
+  your credentials, so you never type an IP. If that fails it leaves core's
+  "Discovered" card.
+- Every 30 minutes it re-reads the list. It repairs the IP of `tplink` entries stuck
+  in setup retry/error, and onboards newly added devices.
+
+**Install.** Copy `custom_components/tapo_onboard` into your `custom_components/`
+directory, or add this repository as a HACS custom repository. The integration needs
+`tapolink-proto` (`packages/tapolink-proto/`) from PyPI, which is **not yet
+published**. Until it is, installation is development-only, via the uv workspace in
+this repository.
+
+**Setup.**
+
+1. Settings > Devices & services > Add integration > "Tapo Cloud Onboarding for
+   TP-Link Smart Home".
+2. Enter your TP-Link account email and password; enter the MFA code if asked.
+3. Tick the devices to onboard. Each is labelled: ready / works partly in TP-Link
+   Smart Home / not supported by TP-Link Smart Home / already in TP-Link Smart Home.
+   Only "ready" devices start ticked.
+4. Wait for the progress step; the devices appear under TP-Link Smart Home.
+
+**Support in core `tplink`** (`docs/research/2026-11-01_core-tplink-onboarding-helper.md` Q4):
+
+| Model | Result in TP-Link Smart Home |
+|---|---|
+| P306 power strip | Full: one switch per socket |
+| L730-6 bulb | Partial: a switch plus two child lights ("Down Light", "Ring Light"); also Matter-capable |
+| S310D | Not supported by core (BLE-mesh companion switch with no on/off); labelled and left unticked |
+
+**Stored:** the refresh token and terminal UUID only. The password is never stored;
+it is held in memory during setup.
+
+**IP upkeep:** the 30-minute poll calls `device_details` only for `tplink` entries in
+setup retry/error and for new devices, and requests a host update through core's DHCP
+flow.
+
+**Limitations.**
+
+- After a Home Assistant restart the password is gone from memory. New devices then
+  get a "Discovered" card and you re-enter credentials there.
+- Core `tplink`'s own login issues still apply (for example plugs on firmware 1.4.x
+  needing TPAP, which core does not provide).
+- Matches are only as good as the cloud's IP data; it does not control devices.
+
+Contract drift against core is checked by `tools/check_core_tplink_contract.sh`.
+
 ## Status
 
-Pre-alpha, design stage. See `docs/ARCHITECTURE.md` §13 for the delivery phases.
+Phase 1a (`tapo_onboard` and `packages/tapolink-proto/`, a cloud-only library) is
+built (2026-11-01). Still pending: manual verification on a real Home Assistant
+instance with real devices. The full `tapolink` integration is still a design; see `docs/ARCHITECTURE.md` §13 for the delivery phases.
 There is **no public release before TPAP support**: without it, most current Tapo
 plugs would not connect.
 

@@ -89,6 +89,18 @@ Out: legacy Kasa IOT protocol (XOR on 9999, IOT.KLAP).
 
 ## Layout
 
+Built now (phase 1a, see ARCHITECTURE §13): the monorepo holds the helper and the
+cloud-only library. The full `tapolink` integration below is still a plan.
+
+```
+packages/tapolink-proto/             # built: cloud/{signing,tls,models,errors,client}.py
+custom_components/tapo_onboard/      # built: config_flow, onboarding, coordinator,
+                                     # diagnostics, quality_scale.yaml
+tools/check_core_tplink_contract.sh  # drift check vs core tplink
+```
+
+Planned:
+
 ```
 custom_components/tapolink/          # this repo
   __init__.py        # setup/unload, account update listener, TapolinkConfigEntry
@@ -260,6 +272,18 @@ One run costs a handful of cloud calls; never loop it (`-20004`).
 Library tests use a device simulator (aiohttp server implementing the device side of
 KLAP/AES/TPAP) plus recorded `component_nego` / `get_device_info` fixtures captured
 from our own devices — not fixture files copied from GPL projects.
+
+## Commands
+
+```bash
+uv run pytest tests -q                                   # helper tests (HA harness)
+uv run pytest packages/tapolink-proto/tests -q           # library tests
+uv run mypy --strict custom_components/tapo_onboard packages/tapolink-proto/src/tapolink_proto
+uv run ruff check .
+tools/check_core_tplink_contract.sh                      # HA_REF_DEV=dev to also check dev
+```
+
+Helper tests use a stub `tplink` flow because the real one needs GPL python-kasa.
 
 ## Style
 
