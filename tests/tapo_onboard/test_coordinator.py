@@ -53,11 +53,13 @@ class FakeCloudClient:
         self.list_errors: list[Exception] = []
         self.refreshed = CloudSession("new-token", "new-refresh", 7)
         self.list_calls = 0
+        self.tokens_seen: list[str] = []
         self.details_calls: list[str] = []
         self.refresh_calls = 0
 
     async def list_devices(self, session: CloudSession) -> list[CloudDevice]:
         self.list_calls += 1
+        self.tokens_seen.append(session.token)
         if self.list_errors:
             raise self.list_errors.pop(0)
         return self.devices
@@ -255,3 +257,28 @@ async def test_rate_limited_retry_after(
     assert not coord.last_update_success
     assert coord.last_exception.retry_after == 1800
     assert coord.last_exception.translation_key == "rate_limited"
+
+
+async def test_reauth_result_picked_up_and_flag_reset(
+    hass: HomeAssistant, mod: ModuleType, stub: type[StubTplinkFlow]
+) -> None:
+    client = FakeCloudClient([], {})
+    client.list_errors = [CloudAuthError(-20601)]
+    entry = _entry(hass)
+    coord = _coord(mod, hass, entry, client)
+    with patch(
+        "homeassistant.config_entries.ConfigEntry.async_start_reauth"
+    ) as reauth:
+        await coord.async_refresh()
+        assert reauth.call_count == 1
+        hass.config_entries.async_update_entry(
+            entry, data={**entry.data, "token": "fresh"}
+        )
+        await coord.async_refresh()
+        assert coord.last_update_success
+        assert client.tokens_seen[-1] == "fresh"
+        # Flag was reset: a later auth loss starts reauth again.
+        client.list_errors = [CloudAuthError(-20601)]
+        await coord.async_refresh()
+        assert not coord.last_update_success
+        assert reauth.call_count == 2

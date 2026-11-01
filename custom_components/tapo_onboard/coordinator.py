@@ -83,10 +83,14 @@ class InventoryCoordinator(DataUpdateCoordinator[InventoryState]):
         self._username = username
         self._attempted: set[str] = set()
         self._reauth_started = False
-        self._session = CloudSession(
-            token=entry.data[CONF_TOKEN],
-            refresh_token=entry.data.get(CONF_REFRESH_TOKEN),
-            account_id=entry.data.get(CONF_ACCOUNT_ID),
+        self._session = self._session_from_entry()
+
+    def _session_from_entry(self) -> CloudSession:
+        data = self._entry.data
+        return CloudSession(
+            token=data[CONF_TOKEN],
+            refresh_token=data.get(CONF_REFRESH_TOKEN),
+            account_id=data.get(CONF_ACCOUNT_ID),
         )
 
     def _start_reauth(self) -> UpdateFailed:
@@ -124,8 +128,11 @@ class InventoryCoordinator(DataUpdateCoordinator[InventoryState]):
             return None
 
     async def _async_update_data(self) -> InventoryState:
+        # Tokens may have been rewritten by the reauth flow since last cycle.
+        self._session = self._session_from_entry()
         try:
             listed = await self._call(self._client.list_devices)
+            self._reauth_started = False
             return await self._process({d.mac: d for d in listed})
         except CloudRateLimited as exc:
             raise UpdateFailed(
