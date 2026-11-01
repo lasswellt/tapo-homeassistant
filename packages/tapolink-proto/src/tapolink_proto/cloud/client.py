@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Provenance: original, ported from tools/spike_cloud_discovery.py
-# (docs/RESEARCH.md §3.1, §11.1-11.4)
+# (docs/RESEARCH.md §3.1, §11.1-11.4, §11.7)
 """TP-Link cloud client: login, MFA, refresh, device list, device details."""
 
 import json
