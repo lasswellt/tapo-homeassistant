@@ -32,6 +32,8 @@ class StubTplinkFlow(ConfigFlow, domain="tplink"):
     valid_password: str = "secret"
     post_auth_camera: bool = False
     dhcp_infos: list[DhcpServiceInfo] = []
+    host_macs: dict[str, str] = {}  # host -> MAC used as the flow unique_id
+    card_hosts: set[str] = set()  # hosts that answer with a camera card
 
     @classmethod
     def reset(cls) -> None:
@@ -39,6 +41,8 @@ class StubTplinkFlow(ConfigFlow, domain="tplink"):
         cls.valid_password = "secret"
         cls.post_auth_camera = False
         cls.dhcp_infos = []
+        cls.host_macs = {}
+        cls.card_hosts = set()
 
     def _create(self, host: str) -> ConfigFlowResult:
         return self.async_create_entry(title=host, data={"host": host})
@@ -55,7 +59,11 @@ class StubTplinkFlow(ConfigFlow, domain="tplink"):
             return self.async_show_form(
                 step_id="user", errors={"base": "cannot_connect"}
             )
-        await self.async_set_unique_id(STUB_MAC)
+        await self.async_set_unique_id(
+            format_mac(type(self).host_macs.get(self._host, STUB_MAC))
+        )
+        if self._host in type(self).card_hosts:
+            return self.async_show_form(step_id="camera_auth_confirm")
         if mode == "auth":
             return self.async_show_form(step_id="user_auth_confirm")
         if mode == "camera":

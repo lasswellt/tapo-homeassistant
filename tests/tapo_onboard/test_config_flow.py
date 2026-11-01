@@ -23,7 +23,7 @@ from pytest_homeassistant_custom_component.common import (
     MockModule,
     mock_integration,
 )
-from stub_tplink import STUB_MAC, stub_tplink
+from stub_tplink import STUB_MAC, StubTplinkFlow, stub_tplink
 from tapolink_proto.cloud import (
     CloudAuthError,
     CloudDevice,
@@ -60,6 +60,16 @@ def _dev(mac: str, alias: str, model: str) -> CloudDevice:
     )
 
 
+HOSTS = {
+    STUB_MAC: "10.0.0.5",
+    MAC_PARTIAL: "10.0.0.6",
+    MAC_UNSUP: "10.0.0.7",
+    MAC_ALREADY: "10.0.0.8",
+}
+MAC_BY_HOST = {host: mac for mac, host in HOSTS.items()}
+# host -> MAC whose identity the fake probe reports instead of the owner's.
+PROBE_AS: dict[str, str] = {}
+
 DEVICES = [
     _dev(STUB_MAC, "Alpha", "P110"),
     _dev(MAC_PARTIAL, "Bravo", "L730"),
@@ -77,6 +87,8 @@ class FakeCloudClient:
     mfa: bool = False
     details_error_on: str | None = None
     details_cancel_on: str | None = None
+    no_ip_on: str | None = None
+    details_calls: list[str] = []
 
     def __init__(self, session: object, *, ssl_context: object, terminal_uuid: str):
         self.terminal_uuid = terminal_uuid
@@ -105,20 +117,29 @@ class FakeCloudClient:
     async def device_details(
         self, session: CloudSession, device: CloudDevice
     ) -> DeviceDetails:
+        self.details_calls.append(device.mac)
+        if device.mac == self.no_ip_on:
+            return DeviceDetails(ip=None, ssid=None, fw_ver=None)
         if device.mac == self.details_cancel_on:
             raise asyncio.CancelledError
         if device.mac == self.details_error_on:
             raise RuntimeError("boom")
-        return DeviceDetails(ip="10.0.0.5", ssid=None, fw_ver=None)
+        return DeviceDetails(ip=HOSTS[device.mac], ssid=None, fw_ver=None)
 
 
 @pytest.fixture(autouse=True)
 def probe() -> Iterator[None]:
+    PROBE_AS.clear()
+
     async def _fake(host: str, *, query: bytes, **_: object) -> TdpInfo | None:
+        owner = MAC_BY_HOST.get(host)
+        if owner is None:
+            return None
+        mac = PROBE_AS.get(host, owner)
         return TdpInfo.from_result(
             {
-                "device_id": hashlib.md5(f"id-{STUB_MAC}".encode()).hexdigest().upper(),
-                "mac": STUB_MAC,
+                "device_id": hashlib.md5(f"id-{mac}".encode()).hexdigest().upper(),
+                "mac": mac,
             }  # noqa: S324
         )
 
@@ -134,17 +155,20 @@ def fake_cloud(hass: HomeAssistant) -> Iterator[type[FakeCloudClient]]:
     FakeCloudClient.mfa = False
     FakeCloudClient.details_error_on = None
     FakeCloudClient.details_cancel_on = None
+    FakeCloudClient.no_ip_on = None
+    FakeCloudClient.details_calls = []
     base = "custom_components.tapo_onboard.config_flow"
     # Manifest depends on core `dhcp`, whose optional deps are not installed.
     mock_integration(hass, MockModule("dhcp"))
     with (
-        stub_tplink(hass),
+        stub_tplink(hass) as stub,
         patch(f"{base}.CloudClient", FakeCloudClient),
         patch(
             f"{base}.build_cloud_ssl_context",
             lambda: ssl.create_default_context(),
         ),
     ):
+        stub.host_macs = dict(MAC_BY_HOST)
         yield FakeCloudClient
 
 
@@ -193,6 +217,14 @@ async def test_happy_path(hass: HomeAssistant) -> None:
     # stub tplink: first device added; the second hits the same host (aborts).
     tplink = hass.config_entries.async_entries("tplink")
     assert any(e.data == {"host": "10.0.0.5"} for e in tplink)
+    # both ticked devices were really added, as distinct tplink entries.
+    ours = [e for e in tplink if e.unique_id != format_mac(MAC_ALREADY)]
+    assert sorted(e.unique_id or "" for e in ours) == sorted(
+        [format_mac(STUB_MAC), format_mac(MAC_PARTIAL)]
+    )
+    ph = result["description_placeholders"]
+    assert ph is not None
+    assert ph["added"] == "2"
 
 
 async def test_mfa_path(hass: HomeAssistant, fake_cloud: type[FakeCloudClient]) -> None:
@@ -305,3 +337,56 @@ async def test_onboarding_cancelled_marks_unreached_failed(
     assert ph is not None
     assert ph["added"] == "1"
     assert ph["failed"] == "2"
+
+
+async def _run(hass: HomeAssistant, macs: list[str]) -> ConfigFlowResult:
+    result = await _login(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"devices": macs}
+    )
+    while result["type"] == FlowResultType.SHOW_PROGRESS:
+        await hass.async_block_till_done()
+        result = await hass.config_entries.flow.async_configure(result["flow_id"])
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    return result
+
+
+async def test_three_devices_added_card_and_no_ip(
+    hass: HomeAssistant, fake_cloud: type[FakeCloudClient]
+) -> None:
+    StubTplinkFlow.card_hosts = {HOSTS[MAC_PARTIAL]}
+    fake_cloud.no_ip_on = MAC_UNSUP
+    result = await _run(hass, [STUB_MAC, MAC_PARTIAL, MAC_UNSUP])
+    assert result["description_placeholders"] == {
+        "added": "1",
+        "confirm": "1",
+        "already": "0",
+        "failed": "1",
+    }
+    tplink = hass.config_entries.async_entries("tplink")
+    assert [e.unique_id for e in tplink] == [format_mac(STUB_MAC)]
+    assert dict(tplink[0].data) == {"host": HOSTS[STUB_MAC]}
+
+
+async def test_untick_ignores_device(
+    hass: HomeAssistant, fake_cloud: type[FakeCloudClient]
+) -> None:
+    result = await _run(hass, [STUB_MAC])
+    assert MAC_PARTIAL in result["data"]["ignored_macs"]
+    assert [e.unique_id for e in hass.config_entries.async_entries("tplink")] == [
+        format_mac(STUB_MAC)
+    ]
+    assert fake_cloud.details_calls == [STUB_MAC]
+
+
+async def test_identity_mismatch_starts_no_flow(
+    hass: HomeAssistant, fake_cloud: type[FakeCloudClient]
+) -> None:
+    PROBE_AS[HOSTS[MAC_PARTIAL]] = STUB_MAC
+    result = await _run(hass, [STUB_MAC, MAC_PARTIAL])
+    ph = result["description_placeholders"]
+    assert ph is not None
+    assert (ph["added"], ph["failed"], ph["confirm"]) == ("1", "1", "0")
+    tplink = hass.config_entries.async_entries("tplink")
+    assert [e.unique_id for e in tplink] == [format_mac(STUB_MAC)]
+    assert not hass.config_entries.flow.async_progress_by_handler("tplink")
