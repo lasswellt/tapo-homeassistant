@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_USERNAME
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from tapolink_proto.cloud import CloudClient, build_cloud_ssl_context
 
@@ -67,6 +67,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: TapoOnboardConfigEntry) 
         handoff.pop(entry.unique_id or "", None)
 
     entry.async_on_unload(_drop_handoff)
+
+    # This integration has no entities, and `update_coordinator` only
+    # reschedules a refresh while listeners exist. Register a no-op listener
+    # before the first refresh so that refresh schedules the next one.
+    @callback
+    def _keep_polling() -> None:
+        """No entities subscribe; HA only reschedules coordinators with listeners."""
+
+    entry.async_on_unload(coordinator.async_add_listener(_keep_polling))
 
     # Not async_config_entry_first_refresh: it raises ConfigEntryNotReady.
     await coordinator.async_refresh()

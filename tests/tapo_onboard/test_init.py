@@ -8,15 +8,18 @@ from __future__ import annotations
 import importlib
 import json
 from collections.abc import Iterator
+from datetime import timedelta
 from typing import Any
 from unittest.mock import patch
 
 import pytest
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
+from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
     MockModule,
+    async_fire_time_changed,
     mock_integration,
 )
 from stub_tplink import STUB_MAC, StubTplinkFlow, stub_tplink
@@ -42,11 +45,13 @@ class FakeCloudClient:
     """Scripted CloudClient (public-method boundary only)."""
 
     fail = False
+    calls = 0
 
     def __init__(self, *args: object, **kwargs: object) -> None:
         pass
 
     async def list_devices(self, session: CloudSession) -> list[CloudDevice]:
+        type(self).calls += 1
         if type(self).fail:
             raise CloudUnavailable("down")
         return [
@@ -81,6 +86,7 @@ async def async_get_config_entry_diagnostics(
 @pytest.fixture(autouse=True)
 def stub(hass: HomeAssistant) -> Iterator[type[StubTplinkFlow]]:
     FakeCloudClient.fail = False
+    FakeCloudClient.calls = 0
     mock_integration(hass, MockModule("dhcp"))
     with (
         stub_tplink(hass) as flow,
@@ -177,3 +183,28 @@ async def test_diagnostics_cloud_error_code(hass: HomeAssistant) -> None:
     diag = await async_get_config_entry_diagnostics(hass, entry)
     assert diag["coordinator"]["last_exception"] == "UpdateFailed"
     assert diag["coordinator"]["last_cloud_error_code"] == -1
+
+
+async def test_coordinator_repolls_without_entities(hass: HomeAssistant) -> None:
+    entry = _entry(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert FakeCloudClient.calls == 1
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(minutes=31))
+    await hass.async_block_till_done()
+    assert FakeCloudClient.calls == 2
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(minutes=62))
+    await hass.async_block_till_done()
+    assert FakeCloudClient.calls == 3
+
+
+async def test_coordinator_stops_polling_after_unload(hass: HomeAssistant) -> None:
+    entry = _entry(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    calls = FakeCloudClient.calls
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(minutes=31))
+    await hass.async_block_till_done()
+    assert FakeCloudClient.calls == calls
