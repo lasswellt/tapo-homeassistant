@@ -27,7 +27,7 @@ async with aiohttp.ClientSession() as http:
     client = CloudClient(
         http,
         ssl_context=build_cloud_ssl_context(),  # blocking; run in an executor
-        terminal_uuid=my_stable_uuid4,          # generate once, keep forever
+        terminal_uuid=my_stable_uuid4,  # generate once, keep forever
     )
     session = await client.login(email, password)
     for device in await client.list_devices(session):
