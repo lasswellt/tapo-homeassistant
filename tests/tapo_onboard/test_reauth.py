@@ -5,10 +5,11 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
+from homeassistant.config_entries import ConfigFlowResult
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -44,12 +45,12 @@ def _entry(hass: HomeAssistant, unique_id: str = EMAIL.lower()) -> MockConfigEnt
     return entry
 
 
-async def _start(hass: HomeAssistant, entry: MockConfigEntry) -> dict[str, Any]:
-    result = await entry.start_reauth_flow(hass)
+async def _start(hass: HomeAssistant, entry: MockConfigEntry) -> ConfigFlowResult:
+    result: Any = await entry.start_reauth_flow(hass)
     assert result["type"] == FlowResultType.FORM
     assert result["step_id"] == "reauth_confirm"
     assert result["description_placeholders"]["username"] == EMAIL
-    return result
+    return cast("ConfigFlowResult", result)
 
 
 @pytest.mark.usefixtures("fake_cloud")

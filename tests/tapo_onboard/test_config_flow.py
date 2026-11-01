@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import ssl
 from collections.abc import Iterator
-from typing import Any
+from typing import cast
 from unittest.mock import patch
 
 import pytest
+import voluptuous as vol
+from homeassistant.config_entries import ConfigFlowResult
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers.device_registry import format_mac
@@ -120,11 +122,11 @@ def fake_cloud(hass: HomeAssistant) -> Iterator[type[FakeCloudClient]]:
         yield FakeCloudClient
 
 
-async def _start(hass: HomeAssistant) -> dict[str, Any]:
+async def _start(hass: HomeAssistant) -> ConfigFlowResult:
     return await hass.config_entries.flow.async_init(DOMAIN, context={"source": "user"})
 
 
-async def _login(hass: HomeAssistant) -> dict[str, Any]:
+async def _login(hass: HomeAssistant) -> ConfigFlowResult:
     result = await _start(hass)
     return await hass.config_entries.flow.async_configure(
         result["flow_id"], {"username": EMAIL, "password": PASSWORD}
@@ -137,7 +139,7 @@ async def test_happy_path(hass: HomeAssistant) -> None:
     ).add_to_hass(hass)
     result = await _login(hass)
     assert result["step_id"] == "pick_devices"
-    schema = result["data_schema"].schema
+    schema = cast("vol.Schema", result["data_schema"]).schema
     key = next(k for k in schema if k == "devices")
     assert sorted(key.default()) == sorted([STUB_MAC, MAC_PARTIAL])
     labels = {o["value"]: o["label"] for o in schema[key].config["options"]}

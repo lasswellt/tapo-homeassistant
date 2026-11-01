@@ -8,6 +8,7 @@ from __future__ import annotations
 import importlib
 from collections.abc import Iterator
 from types import ModuleType
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import patch
 
 import pytest
@@ -24,6 +25,9 @@ from tapolink_proto.cloud import (
     DeviceDetails,
     TokenExpired,
 )
+
+if TYPE_CHECKING:
+    from custom_components.tapo_onboard.coordinator import InventoryCoordinator
 
 MAC2 = "11:22:33:44:55:66"
 MAC3 = "11:22:33:44:55:77"
@@ -114,9 +118,12 @@ def _coord(
     entry: MockConfigEntry,
     client: FakeCloudClient,
     password: str | None = None,
-) -> object:
-    return mod.InventoryCoordinator(
-        hass, entry, client, password=lambda: password, username="u@example.com"
+) -> InventoryCoordinator:
+    return cast(
+        "InventoryCoordinator",
+        mod.InventoryCoordinator(
+            hass, entry, client, password=lambda: password, username="u@example.com"
+        ),
     )
 
 
@@ -224,9 +231,7 @@ async def test_auth_error_starts_reauth_once(
     client.list_errors = [CloudAuthError(-20601), CloudAuthError(-20601)]
     entry = _entry(hass)
     coord = _coord(mod, hass, entry, client)
-    with patch(
-        "homeassistant.config_entries.ConfigEntry.async_start_reauth"
-    ) as reauth:
+    with patch("homeassistant.config_entries.ConfigEntry.async_start_reauth") as reauth:
         await coord.async_refresh()
         await coord.async_refresh()
     assert not coord.last_update_success
@@ -239,9 +244,7 @@ async def test_second_token_expired_starts_reauth(
     client = FakeCloudClient([], {})
     client.list_errors = [TokenExpired(-20651), TokenExpired(-20651)]
     coord = _coord(mod, hass, _entry(hass), client)
-    with patch(
-        "homeassistant.config_entries.ConfigEntry.async_start_reauth"
-    ) as reauth:
+    with patch("homeassistant.config_entries.ConfigEntry.async_start_reauth") as reauth:
         await coord.async_refresh()
     assert not coord.last_update_success
     reauth.assert_called_once()
@@ -252,7 +255,7 @@ async def test_rate_limited_retry_after(
 ) -> None:
     client = FakeCloudClient([], {})
     client.list_errors = [CloudRateLimited(-20004, retry_after=1800)]
-    coord = _coord(mod, hass, _entry(hass), client)
+    coord: Any = _coord(mod, hass, _entry(hass), client)
     await coord.async_refresh()
     assert not coord.last_update_success
     assert coord.last_exception.retry_after == 1800
@@ -266,9 +269,7 @@ async def test_reauth_result_picked_up_and_flag_reset(
     client.list_errors = [CloudAuthError(-20601)]
     entry = _entry(hass)
     coord = _coord(mod, hass, entry, client)
-    with patch(
-        "homeassistant.config_entries.ConfigEntry.async_start_reauth"
-    ) as reauth:
+    with patch("homeassistant.config_entries.ConfigEntry.async_start_reauth") as reauth:
         await coord.async_refresh()
         assert reauth.call_count == 1
         hass.config_entries.async_update_entry(
