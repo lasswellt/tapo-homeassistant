@@ -73,7 +73,7 @@ this repository.
    Only "ready" devices start ticked.
 4. Wait for the progress step; the devices appear under TP-Link Smart Home.
 
-**Support in core `tplink`** (`docs/research/2026-11-01_core-tplink-onboarding-helper.md` Q4):
+**Support in core `tplink`** (tested on the maintainer's devices, 2026-11-01):
 
 | Model | Result in TP-Link Smart Home |
 |---|---|
@@ -102,7 +102,7 @@ Contract drift against core is checked by `tools/check_core_tplink_contract.sh`.
 
 Phase 1a (`tapo_onboard` and `packages/tapolink-proto/`, a cloud-only library) is
 built (2026-11-01). Still pending: manual verification on a real Home Assistant
-instance with real devices. The full `tapolink` integration is still a design; see `docs/ARCHITECTURE.md` §13 for the delivery phases.
+instance with real devices. The full `tapolink` integration is still a design.
 There is **no public release before TPAP support**: without it, most current Tapo
 plugs would not connect.
 
@@ -204,15 +204,12 @@ failures, so pick one per device.
 
 ## Documentation
 
-- `docs/ARCHITECTURE.md`: the design (revision 3). Covers the library/integration
-  split, data model, credentials, resolution, device model, flows, entities, repairs,
-  quality-scale tracking, phases and risks.
-- `docs/RESEARCH.md`: the protocol reference. Covers AES securePassthrough, KLAP
-  v1/v2, TPAP/SPAKE2+, the TDP packet format, TP-Link cloud V1 and V2 APIs, the
-  ecosystem survey and operational landmines.
-- `docs/research/`: dated research notes and reviews. These include the HA
-  Platinum review and the UX review (2026-11-01).
+- The design notes, protocol reference and research behind this project are kept
+  outside the repository. Source files name the section they were written from in
+  their `Provenance:` header.
 - `CLAUDE.md`: working context for Claude Code.
+- `custom_components/tapo_onboard/quality_scale.yaml`: Home Assistant quality-scale
+  self-audit.
 
 ## Credits
 

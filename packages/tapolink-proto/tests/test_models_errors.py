@@ -93,8 +93,8 @@ def test_from_api_errors() -> None:
 
 
 def test_details_ip_filtering() -> None:
-    keep = DeviceDetails.from_api({"ip": "10.10.30.63", "ssid": "net", "fwVer": "1"})
-    assert (keep.ip, keep.ssid, keep.fw_ver) == ("10.10.30.63", "net", "1")
+    keep = DeviceDetails.from_api({"ip": "192.168.1.50", "ssid": "net", "fwVer": "1"})
+    assert (keep.ip, keep.ssid, keep.fw_ver) == ("192.168.1.50", "net", "1")
     assert DeviceDetails.from_api({"ip": "8.8.8.8"}).ip is None
     assert DeviceDetails.from_api({"ip": "garbage"}).ip is None
     assert DeviceDetails.from_api({}).ip is None

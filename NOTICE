@@ -4,7 +4,7 @@ Copyright 2026 tapolink contributors
 This product is licensed under the Apache License, Version 2.0 (see LICENSE).
 
 It contains no code from GPL-licensed projects. Protocol knowledge was obtained by
-reading public sources and is recorded in docs/RESEARCH.md. Third-party code adapted
+reading public sources and is recorded in the project's protocol notes. Third-party code adapted
 into this repository, if any, is listed with its licence in THIRD_PARTY_NOTICES.
 
 Not affiliated with or endorsed by TP-Link.
