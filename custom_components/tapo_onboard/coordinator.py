@@ -220,6 +220,9 @@ class InventoryCoordinator(DataUpdateCoordinator[InventoryState]):
                     outcomes[mac] = OnboardOutcome.IDENTITY_MISMATCH
                     self._attempted.add(mac)
                     continue
+                if identity is IdentityResult.NO_REPLY:
+                    # Unverified host: no hand-off, retry next cycle.
+                    continue
                 async_request_host_update(self.hass, host=details.ip, mac=mac)
                 outcomes[mac] = OnboardOutcome.HANDED_TO_USER
                 self._attempted.add(mac)

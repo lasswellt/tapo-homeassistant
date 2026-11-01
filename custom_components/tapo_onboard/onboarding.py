@@ -105,6 +105,7 @@ async def async_onboard_device(
     """Drive core's `tplink` user flow for `host`, falling back to a card.
 
     Credentials are only sent once the host proved the cloud-reported identity.
+    A silent host (TDP NO_REPLY) is CANNOT_CONNECT: retryable, no flow started.
     """
     identity = await async_verify_identity(
         hass, host=host, mac=mac, device_id=device_id
@@ -112,8 +113,8 @@ async def async_onboard_device(
     if identity is IdentityResult.MISMATCH:
         return OnboardOutcome.IDENTITY_MISMATCH
     if identity is IdentityResult.NO_REPLY:
-        async_request_host_update(hass, host=host, mac=mac)
-        return OnboardOutcome.HANDED_TO_USER
+        # Unverified host: a DHCP flow would test credentials against it.
+        return OnboardOutcome.CANNOT_CONNECT
     flow = hass.config_entries.flow
     try:
         result = await flow.async_init(

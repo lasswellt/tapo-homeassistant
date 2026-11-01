@@ -184,16 +184,15 @@ async def test_identity_mismatch_mac(
     assert hass.config_entries.async_entries("tplink") == []
 
 
-async def test_no_reply_handed_to_user_without_credentials(
+async def test_no_reply_cannot_connect_no_flow(
     hass: HomeAssistant, onb: ModuleType, stub: type[StubTplinkFlow]
 ) -> None:
     stub.connect_result = "auth"
     with _probe_returns(None):
-        assert await _onboard(onb, hass) is onb.OnboardOutcome.HANDED_TO_USER
+        assert await _onboard(onb, hass) is onb.OnboardOutcome.CANNOT_CONNECT
     await hass.async_block_till_done()
-    flows = hass.config_entries.flow.async_progress_by_handler("tplink")
-    assert [f["context"]["source"] for f in flows] == [SOURCE_DHCP]
-    assert [f["step_id"] for f in flows] != ["user_auth_confirm"]
+    assert hass.config_entries.flow.async_progress_by_handler("tplink") == []
+    assert stub.dhcp_infos == []
     assert hass.config_entries.async_entries("tplink") == []
 
 

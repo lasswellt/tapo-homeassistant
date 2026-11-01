@@ -232,8 +232,9 @@ async def test_attempted_not_retried(
 ) -> None:
     client = FakeCloudClient([_device(MAC2)], {MAC2: "192.168.1.60"})
     coord = _coord(mod, hass, _entry(hass), client, password="secret")
-    await coord.async_refresh()
-    await coord.async_refresh()
+    with _probe_returns(_tdp(f"id-{MAC2}", mac=MAC2)):
+        await coord.async_refresh()
+        await coord.async_refresh()
     assert client.list_calls == 2
     assert client.details_calls == [MAC2]
 
@@ -371,12 +372,21 @@ async def test_new_device_no_password_mismatch_no_card(
     assert stub.dhcp_infos == []
 
 
-async def test_new_device_no_password_no_reply_card(
+async def test_new_device_no_password_no_reply_no_flow_retried(
     hass: HomeAssistant, mod: ModuleType, stub: type[StubTplinkFlow]
 ) -> None:
     client = FakeCloudClient([_device(STUB_MAC)], {STUB_MAC: "10.0.0.5"})
+    coord = _coord(mod, hass, _entry(hass), client)
     with _probe_returns(None):
-        state = await _coord(mod, hass, _entry(hass), client)._async_update_data()
+        state = await coord._async_update_data()
+        await hass.async_block_till_done()
+        assert STUB_MAC not in state.outcomes
+        assert stub.dhcp_infos == []
+        assert hass.config_entries.flow.async_progress_by_handler("tplink") == []
+        await coord._async_update_data()
+    assert client.details_calls == [STUB_MAC, STUB_MAC]
+    assert stub.dhcp_infos == []
+    state = await coord._async_update_data()
     await hass.async_block_till_done()
     assert state.outcomes[STUB_MAC] == "handed_to_user"
     assert len(stub.dhcp_infos) == 1
