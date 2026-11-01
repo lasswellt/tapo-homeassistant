@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import ssl
 from collections.abc import Iterator
@@ -30,6 +31,7 @@ from tapolink_proto.cloud import (
     CloudSession,
     CloudUnavailable,
     DeviceDetails,
+    DeviceOffline,
     MfaRequired,
 )
 from tapolink_proto.discovery import TdpInfo
@@ -73,6 +75,8 @@ class FakeCloudClient:
     login_error: Exception | None = None
     submit_error: Exception | None = None
     mfa: bool = False
+    details_error_on: str | None = None
+    details_cancel_on: str | None = None
 
     def __init__(self, session: object, *, ssl_context: object, terminal_uuid: str):
         self.terminal_uuid = terminal_uuid
@@ -101,6 +105,10 @@ class FakeCloudClient:
     async def device_details(
         self, session: CloudSession, device: CloudDevice
     ) -> DeviceDetails:
+        if device.mac == self.details_cancel_on:
+            raise asyncio.CancelledError
+        if device.mac == self.details_error_on:
+            raise RuntimeError("boom")
         return DeviceDetails(ip="10.0.0.5", ssid=None, fw_ver=None)
 
 
@@ -124,6 +132,8 @@ def fake_cloud(hass: HomeAssistant) -> Iterator[type[FakeCloudClient]]:
     FakeCloudClient.login_error = None
     FakeCloudClient.submit_error = None
     FakeCloudClient.mfa = False
+    FakeCloudClient.details_error_on = None
+    FakeCloudClient.details_cancel_on = None
     base = "custom_components.tapo_onboard.config_flow"
     # Manifest depends on core `dhcp`, whose optional deps are not installed.
     mock_integration(hass, MockModule("dhcp"))
@@ -209,6 +219,7 @@ async def test_mfa_path(hass: HomeAssistant, fake_cloud: type[FakeCloudClient]) 
         (CloudAuthError(-20601), "invalid_auth"),
         (CloudUnavailable("down"), "cannot_connect"),
         (CloudRateLimited(-20004, retry_after=1800), "rate_limited"),
+        (DeviceOffline(-20571), "cannot_connect"),
         (RuntimeError("boom"), "unknown"),
     ],
 )
@@ -258,3 +269,39 @@ async def test_zero_devices(
         result = await hass.config_entries.flow.async_configure(result["flow_id"])
     assert result["type"] == FlowResultType.CREATE_ENTRY
     assert result["data"]["ignored_macs"] == []
+
+
+async def test_onboarding_device_failure_still_creates_entry(
+    hass: HomeAssistant, fake_cloud: type[FakeCloudClient]
+) -> None:
+    fake_cloud.details_error_on = MAC_PARTIAL
+    result = await _login(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"devices": [STUB_MAC, MAC_PARTIAL]}
+    )
+    while result["type"] == FlowResultType.SHOW_PROGRESS:
+        await hass.async_block_till_done()
+        result = await hass.config_entries.flow.async_configure(result["flow_id"])
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    ph = result["description_placeholders"]
+    assert ph is not None
+    assert ph["added"] == "1"
+    assert ph["failed"] == "1"
+
+
+async def test_onboarding_cancelled_marks_unreached_failed(
+    hass: HomeAssistant, fake_cloud: type[FakeCloudClient]
+) -> None:
+    fake_cloud.details_cancel_on = MAC_PARTIAL
+    result = await _login(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"devices": [STUB_MAC, MAC_PARTIAL, MAC_UNSUP]}
+    )
+    while result["type"] == FlowResultType.SHOW_PROGRESS:
+        await hass.async_block_till_done()
+        result = await hass.config_entries.flow.async_configure(result["flow_id"])
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    ph = result["description_placeholders"]
+    assert ph is not None
+    assert ph["added"] == "1"
+    assert ph["failed"] == "2"

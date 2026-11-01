@@ -12,7 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 import probatio as vol
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import ConfigEntryState, ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
@@ -28,6 +28,7 @@ from tapolink_proto.cloud import (
     CloudAuthError,
     CloudClient,
     CloudDevice,
+    CloudError,
     CloudRateLimited,
     CloudResponseError,
     CloudSession,
@@ -75,7 +76,6 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
         self._process_id = ""
         self._session: CloudSession | None = None
         self._devices: list[CloudDevice] = []
-        self._ticked: list[str] = []
         self._selected: set[str] = set()
         self._ignored: list[str] = []
         self._outcomes: dict[str, OnboardOutcome] = {}
@@ -92,6 +92,9 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
                 placeholders["minutes"] = str(max(1, round(err.retry_after / 60)))
             return "rate_limited", placeholders
         if isinstance(err, CloudUnavailable | CloudResponseError):
+            return "cannot_connect", placeholders
+        if isinstance(err, CloudError):
+            LOGGER.debug("Tapo cloud sign-in failed: %s", type(err).__name__)
             return "cannot_connect", placeholders
         LOGGER.exception("Unexpected error during Tapo cloud sign-in")
         return "unknown", placeholders
@@ -234,14 +237,20 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
         self.hass.data.setdefault(DOMAIN, {}).setdefault(DATA_PENDING_PASSWORD, {})[
             unique_id
         ] = self._password
-        return self.async_update_and_abort(
-            self._get_reauth_entry(),
+        entry = self._get_reauth_entry()
+        result = self.async_update_and_abort(
+            entry,
             data_updates={
                 CONF_TOKEN: self._session.token,
                 CONF_REFRESH_TOKEN: self._session.refresh_token,
                 CONF_ACCOUNT_ID: self._session.account_id,
             },
         )
+        if entry.state is ConfigEntryState.LOADED:
+            self.hass.async_create_task(
+                entry.runtime_data.coordinator.async_request_refresh()
+            )
+        return result
 
     def _classify(self, device: CloudDevice) -> _Kind:
         if async_tplink_entry_for_mac(self.hass, device.mac) is not None:
@@ -274,7 +283,6 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
             )
             if kind in (_Kind.READY, _Kind.PARTIAL):
                 ticked.append(device.mac)
-        self._ticked = ticked
         schema = vol.Schema(
             {
                 vol.Required(CONF_DEVICES, default=ticked): SelectSelector(
@@ -324,8 +332,12 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
                 progress_task=self._task,
             )
         task, self._task = self._task, None
-        if (err := task.exception()) is not None:
+        if task.cancelled():
+            LOGGER.warning("Onboarding was cancelled")
+        elif (err := task.exception()) is not None:
             LOGGER.error("Onboarding failed: %s", type(err).__name__)
+        for mac in self._selected:
+            self._outcomes.setdefault(mac, OnboardOutcome.CANNOT_CONNECT)
         return self.async_show_progress_done(next_step_id="finish")
 
     async def async_step_finish(
@@ -343,7 +355,11 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
             OnboardOutcome.AUTH_FAILED
         )
         already = outcomes.count(OnboardOutcome.ALREADY_CONFIGURED)
-        failed = len(outcomes) - added - confirm - already
+        failed = (
+            outcomes.count(OnboardOutcome.CANNOT_CONNECT)
+            + outcomes.count(OnboardOutcome.UNAVAILABLE)
+            + outcomes.count(OnboardOutcome.IDENTITY_MISMATCH)
+        )
         return self.async_create_entry(
             title=unique_id,
             data={

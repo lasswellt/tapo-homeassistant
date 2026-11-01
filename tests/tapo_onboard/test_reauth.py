@@ -9,11 +9,11 @@ from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
-from homeassistant.config_entries import ConfigFlowResult
+from homeassistant.config_entries import ConfigEntryState, ConfigFlowResult
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
-from tapolink_proto.cloud import CloudAuthError
+from tapolink_proto.cloud import CloudAuthError, CloudDevice, CloudSession
 from test_config_flow import (
     DATA_PENDING_PASSWORD,
     DOMAIN,
@@ -23,6 +23,9 @@ from test_config_flow import (
 )
 from test_config_flow import (
     fake_cloud as fake_cloud,
+)
+from test_config_flow import (
+    probe as probe,
 )
 
 TERMINAL_UUID = "11111111-2222-3333-4444-555555555555"
@@ -129,3 +132,35 @@ async def test_reauth_mfa(hass: HomeAssistant) -> None:
     assert result["type"] == FlowResultType.ABORT
     assert result["reason"] == "reauth_successful"
     assert entry.data["token"] == "tok"
+
+
+@pytest.mark.usefixtures("fake_cloud")
+async def test_reauth_refreshes_loaded_coordinator(hass: HomeAssistant) -> None:
+    entry = _entry(hass)
+    calls = 0
+    orig_list = FakeCloudClient.list_devices
+
+    async def counting(
+        self: FakeCloudClient, session: CloudSession
+    ) -> list[CloudDevice]:
+        nonlocal calls
+        calls += 1
+        return await orig_list(self, session)
+
+    with (
+        patch.object(FakeCloudClient, "list_devices", counting),
+        patch("custom_components.tapo_onboard.CloudClient", FakeCloudClient),
+        patch.object(hass.config_entries, "async_reload") as reload_mock,
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        assert entry.state is ConfigEntryState.LOADED
+        before = calls
+        result = await _start(hass, entry)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"password": PASSWORD}
+        )
+        await hass.async_block_till_done()
+    assert result["reason"] == "reauth_successful"
+    assert calls == before + 1
+    reload_mock.assert_not_called()
