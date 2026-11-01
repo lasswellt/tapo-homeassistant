@@ -35,6 +35,17 @@ strict = true
 # custom_components/ is a namespace package (no __init__.py by design, see
 # tests/conftest.py); resolve modules from the repo root so relative imports work.
 explicit_package_bases = true
+# Phase 0 spike is excluded for the same reason as in [tool.ruff]: one-off
+# validation script, optional GPL oracle import, not product code.
+exclude = ["^tools/spike_cloud_discovery\\.py$"]
+# pytest (rootdir conftest, no tests/__init__.py) puts tests/tapo_onboard on
+# sys.path, so the tests import their helpers by bare name; mirror that here.
+mypy_path = "tests/tapo_onboard"
+
+[[tool.mypy.overrides]]
+# The HA test harness ships no py.typed marker; treat it as untyped.
+module = ["pytest_homeassistant_custom_component", "pytest_homeassistant_custom_component.*"]
+ignore_missing_imports = true
 
 [tool.ruff]
 target-version = "py313"
