@@ -19,6 +19,7 @@ from freezegun.api import FrozenDateTimeFactory
 from homeassistant.config_entries import SOURCE_DHCP, ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import format_mac
+from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 from stub_tplink import STUB_MAC, StubTplinkFlow, stub_tplink
 from tapolink_proto.cloud import (
@@ -510,3 +511,73 @@ async def test_onboard_exception_isolated(
     assert coord.data.outcomes[MAC2].value == "cannot_connect"
     assert coord.data.outcomes[STUB_MAC].value == "added"
     assert len(hass.config_entries.async_entries("tplink")) == 1
+
+
+def _count_logins(stub: type[StubTplinkFlow]) -> list[str]:
+    """Record each credential submission reaching the stub core flow."""
+    submitted: list[str] = []
+    original = stub.async_step_user_auth_confirm
+
+    async def _spy(
+        self: StubTplinkFlow, user_input: dict[str, Any] | None = None
+    ) -> Any:
+        if user_input is not None:
+            submitted.append(self._host)
+        return await original(self, user_input)
+
+    stub.async_step_user_auth_confirm = _spy  # type: ignore[method-assign]
+    return submitted
+
+
+async def test_terminal_outcomes_not_retried_after_floor(
+    hass: HomeAssistant,
+    mod: ModuleType,
+    stub: type[StubTplinkFlow],
+    freezer: FrozenDateTimeFactory,
+) -> None:
+    """Terminal outcomes stay attempted after the 15-min details floor lapses."""
+    stub.connect_result = "auth"
+    stub.valid_password = "other"
+    logins = _count_logins(stub)
+
+    # Part 1: password path, AUTH_FAILED on refresh 1 is never retried.
+    client = FakeCloudClient([_device(STUB_MAC)], {STUB_MAC: "10.0.0.5"})
+    coord = _coord(mod, hass, _entry(hass), client, password="secret")
+    await coord.async_refresh()
+    assert coord.data.outcomes[STUB_MAC].value == "auth_failed"
+    assert client.details_calls == [STUB_MAC]
+    assert len(logins) == 1
+    freezer.tick(timedelta(minutes=31))
+    await coord.async_refresh()
+    assert client.details_calls == [STUB_MAC]
+    assert len(logins) == 1
+    assert STUB_MAC not in coord.data.outcomes
+
+    # Part 2: flow hand-off, terminal MAC skipped, CANNOT_CONNECT MAC retried.
+    logins.clear()
+    client2 = FakeCloudClient(
+        [_device(STUB_MAC), _device(MAC2)],
+        {STUB_MAC: "10.0.0.5", MAC2: "10.0.0.6"},
+    )
+    now = dt_util.utcnow()
+    flow_result = mod.FlowResult(
+        outcomes={
+            STUB_MAC: mod.OnboardOutcome.AUTH_FAILED,
+            MAC2: mod.OnboardOutcome.CANNOT_CONNECT,
+        },
+        details_at={STUB_MAC: now, MAC2: now},
+    )
+    coord2 = mod.InventoryCoordinator(
+        hass,
+        _entry(hass),
+        client2,
+        password=lambda: "secret",
+        username="u@example.com",
+        flow_result=flow_result,
+    )
+    freezer.tick(timedelta(minutes=31))
+    await coord2.async_refresh()
+    assert client2.details_calls == [MAC2]
+    assert MAC2 in coord2.data.outcomes  # retried: an outcome was produced
+    assert STUB_MAC not in coord2.data.outcomes
+    assert STUB_MAC not in logins

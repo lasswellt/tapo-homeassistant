@@ -102,7 +102,7 @@ async def async_onboard_device(
     username: str,
     password: str,
 ) -> OnboardOutcome:
-    """Drive core's `tplink` user flow for `host`, falling back to a card.
+    """Drive core's `tplink` user flow for a verified `host`.
 
     Credentials are only sent once the host proved the cloud-reported identity.
     A silent host (TDP NO_REPLY) is CANNOT_CONNECT: retryable, no flow started.

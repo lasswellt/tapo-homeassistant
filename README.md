@@ -52,8 +52,8 @@ Home Assistant's core `tplink` integration controls the devices.
 - Logs in to the TP-Link cloud (with MFA if enabled) and lists your devices with
   their LAN IPs.
 - Drives core `tplink`'s add-device flow for the ones you pick, passing the IP and
-  your credentials, so you never type an IP. If that fails it leaves core's
-  "Discovered" card.
+  your credentials, so you never type an IP. The hand-off, and any "Discovered" card,
+  happen only after the device answers an identity probe.
 - Every 30 minutes it re-reads the list. It repairs the IP of `tplink` entries stuck
   in setup retry/error, and onboards newly added devices.
 
@@ -91,7 +91,11 @@ flow.
 **Limitations.**
 
 - After a Home Assistant restart the password is gone from memory. New devices then
-  get a "Discovered" card and you re-enter credentials there.
+  get a "Discovered" card, only if they pass the identity probe, and you re-enter
+  credentials there.
+- A device that does not answer the identity probe (for example UDP 20002 blocked
+  between Home Assistant and the IoT network) is not onboarded and is retried every
+  30 minutes.
 - Core `tplink`'s own login issues still apply (for example plugs on firmware 1.4.x
   needing TPAP, which core does not provide).
 - Matches are only as good as the cloud's IP data; it does not control devices.

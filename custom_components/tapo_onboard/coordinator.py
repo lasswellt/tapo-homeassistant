@@ -5,7 +5,8 @@
 
 Fixed cadence: `timedelta(minutes=30)` (`INVENTORY_INTERVAL`), one
 `list_devices` call per cycle. `device_details` is only called for `tplink`
-entries that failed to set up (IP repair) and for devices not yet seen.
+entries that failed to set up (IP repair) and for devices not yet seen, and at
+most once per device per 15 minutes (`DETAILS_FLOOR`).
 """
 
 from __future__ import annotations
