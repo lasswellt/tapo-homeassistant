@@ -38,6 +38,9 @@ explicit_package_bases = true
 
 [tool.ruff]
 target-version = "py313"
+# Phase 0 validation spike: a standalone one-off script kept verbatim for
+# reproducibility (docs/RESEARCH.md §11); not product code.
+extend-exclude = ["tools/spike_cloud_discovery.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
