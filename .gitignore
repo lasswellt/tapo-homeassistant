@@ -1,0 +1,20 @@
+# Secrets and spike output — never commit
+.env
+.env.*
+report*.json
+*.report.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Local session tooling
+.cc-sessions/

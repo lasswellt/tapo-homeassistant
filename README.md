@@ -1,0 +1,166 @@
+# tapolink — Tapo for Home Assistant, without the IP addresses
+
+A Home Assistant custom integration for TP-Link Tapo (and current Kasa) devices that
+uses the TP-Link cloud **for discovery only** and controls every device **locally
+over the LAN**.
+
+Sign in once with your Tapo account. Tick the devices you want. Done. No IP
+addresses, no DHCP reservations, and it works when your IoT devices are on a
+different VLAN from Home Assistant.
+
+You sign in once. After that, new devices on your Tapo account are added
+automatically. Any device you untick stays out until you add it back.
+
+## Why this exists
+
+The official `tplink` integration and the existing Tapo custom components discover
+devices by UDP broadcast to `255.255.255.255:20002`. Broadcast does not cross
+subnets. So once your smart plugs live on an IoT VLAN, you have to enter IP addresses
+by hand and pin DHCP leases forever.
+
+The TP-Link cloud already knows every device on your account **and its LAN IP**.
+This integration reads that inventory, then connects to each device directly.
+Control never goes through the cloud.
+
+| | Official `tplink` (TP-Link Smart Home) | tapolink |
+|---|---|---|
+| Setup | IP address per device (or same-subnet broadcast) | Account login, tick a list |
+| Cross-subnet discovery | No | Yes |
+| New devices | Discovered on the same subnet only | Added automatically from your account |
+| Control path | Local | Local |
+| Cloud usage | None | Device list only, every 30 min |
+| Plugs on firmware 1.4.x (TPAP login) | Upstream support pending | Required before the first public release |
+| Device scope | Tapo, Kasa (incl. legacy) | Tapo + current Kasa; first release: plugs, power strips, bulbs, light strips, wall switches and dimmers |
+| Moving between the two | — | Guided; see "Moving from TP-Link Smart Home" below |
+
+## How it is built
+
+- **`tapolink-proto`**: a standalone async Python library with its own
+  implementation of the TP-Link cloud inventory API, the Tapo Discovery Protocol, and
+  the local AES / KLAP / TPAP protocols. Published separately on PyPI.
+- **`tapolink`**: this repository, the Home Assistant integration on top of it,
+  designed to Home Assistant's Platinum quality scale.
+
+Both are Apache-2.0 licensed and contain no GPL code.
+
+## Status
+
+Pre-alpha, design stage. See `docs/ARCHITECTURE.md` §13 for the delivery phases.
+There is **no public release before TPAP support**: without it, most current Tapo
+plugs would not connect.
+
+Before writing integration code, run the validation spike against your own account:
+
+```bash
+uv run tools/spike_cloud_discovery.py --username you@example.com
+# or: pip install aiohttp cryptography
+#     python tools/spike_cloud_discovery.py --username you@example.com
+```
+
+The spike checks:
+
+- that the cloud returns LAN IPs for your device types, and whether those IPs are
+  current;
+- each device's protocol, by probing it over unicast UDP;
+- whether a cloud token can be refreshed without the password;
+- how shared devices identify themselves;
+- optionally, whether the login can say "Home Assistant" instead of "iPhone"
+  (`--term-name`).
+
+Add `--json report.json` for a full dump. Redact it before sharing: it contains
+device IDs and MAC addresses. The local-connect stage can optionally use
+python-kasa as an independent cross-check if you install it yourself. tapolink
+neither depends on nor includes it.
+
+## Moving from TP-Link Smart Home
+
+Since Home Assistant 2026.8, devices are no longer merged across integrations. A
+device set up in both places appears twice, and the second copy's entities get `_2`
+IDs. During setup, devices that TP-Link Smart Home already manages start unticked.
+
+To move one:
+
+1. Note any automations that use the device.
+2. Delete the device in **TP-Link Smart Home**. This frees its entity IDs.
+3. Add it in tapolink, either by ticking it in setup or with **Add device** on the
+   account.
+4. Check the automations. They work again if the entity IDs match.
+
+Running both integrations against the same device causes intermittent login
+failures, so pick one per device.
+
+## Known limitations
+
+- Cameras, doorbells, hubs, hub sensors and vacuums are not supported yet. Legacy
+  Kasa devices (port 9999 protocol) are out of scope.
+- Devices using the old AES login (pre-2023 firmware) need your password again after
+  each Home Assistant restart. A single repair notice asks for it.
+- On another VLAN, an IP change can take up to 15–30 minutes to notice, because
+  DHCP traffic does not cross VLANs. You can pin an IP per device under
+  **Reconfigure** if you prefer.
+- Matter-capable models (P110M, P125M, P210M, P304M, L535E, …) are added like any
+  device. A notice explains that Home Assistant's Matter integration can also
+  control them, with no TP-Link login.
+
+## Security posture
+
+- **Your Tapo password is never written to disk.** It is exchanged for a cloud refresh
+  token and kept in memory only until Home Assistant restarts.
+- **What is stored** in Home Assistant's config entry storage, like every
+  integration's credentials:
+  - the cloud refresh token and a per-install terminal ID;
+  - for KLAP devices, a login hash derived from your email and password, so plugs
+    reconnect after a restart without asking you. The devices require this exact hash,
+    so tapolink cannot strengthen it;
+  - for TPAP devices, per-device login material derived the same way, but through a
+    slower key-derivation step.
+- **What a stolen hash means.** Anyone who copies these values (from a backup, a
+  `.storage` copy or the disk) can:
+  - **control your KLAP devices on your local network** directly;
+  - **guess your password offline.** The KLAP hash uses fast, unsalted hashing
+    (SHA-1/SHA-256, or MD5 on older devices), and your email is already known, so
+    ordinary hardware can test billions of guesses per second. **This can expose a
+    weak or reused password, and with it your whole TP-Link account (cameras
+    included), not just the plugs.** The TPAP material slows guessing but does not
+    prevent it for a weak password.
+- **What to do:**
+  - use a **strong, unique** password for your TP-Link account, and don't reuse it
+    anywhere else;
+  - turn on **encrypted Home Assistant backups**, and keep unencrypted copies of
+    `.storage` off shared or cloud drives;
+  - consider a **dedicated TP-Link account** that owns only your Home Assistant
+    devices, once spike Q7 confirms that works (see below).
+- **Diagnostics downloads** contain no tokens, hashes, MAC addresses or device names.
+- **Cloud usage** is at most one sign-in, one token refresh per expiry, and one
+  device-list check per 30 minutes. TP-Link rate-limits and locks accounts that
+  exceed this. If the cloud is unreachable or your sign-in expires, **your devices
+  keep working**; only finding new devices pauses.
+- **Before any credentials are sent**, each device's identity is checked against
+  your account's device list.
+- **Your Tapo account's list of signed-in devices** shows this integration under the
+  name "Home Assistant". The login accepts that name (verified 2026-11-01). Otherwise
+  it talks to the TP-Link cloud the way the Tapo iOS app does, so other fields may
+  still say iOS/iPhone.
+- **Shared devices.** Whether a device shared into your account from another
+  TP-Link account can be controlled locally is still being verified (spike Q7). Until
+  then, use the account that owns the devices.
+
+## Documentation
+
+- `docs/ARCHITECTURE.md`: the design (revision 3). Covers the library/integration
+  split, data model, credentials, resolution, device model, flows, entities, repairs,
+  quality-scale tracking, phases and risks.
+- `docs/RESEARCH.md`: the protocol reference. Covers AES securePassthrough, KLAP
+  v1/v2, TPAP/SPAKE2+, the TDP packet format, TP-Link cloud V1 and V2 APIs, the
+  ecosystem survey and operational landmines.
+- `docs/research/`: dated research notes and reviews. These include the HA
+  Platinum review and the UX review (2026-11-01).
+- `CLAUDE.md`: working context for Claude Code.
+
+## Credits
+
+Protocol knowledge in this repo was assembled by reading the work of the
+`python-kasa` maintainers, `petretiandrea/plugp100`, `JurajNyiri/pytapo`,
+`mihai-dinculescu/tapo`, `TA2k/ioBroker.tapo`, `iluvdata/PyKasaCloud`, K4CZP3R,
+Quentin Kaiser, and Spaceraccoon. No code from GPL-licensed projects is included.
+Not affiliated with or endorsed by TP-Link.

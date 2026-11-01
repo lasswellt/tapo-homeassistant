@@ -1,0 +1,17 @@
+Third-party code in this repository
+====================================
+
+Every file that contains code adapted from another project carries a header:
+
+    # Provenance: adapted from <repo>@<commit> <path> (<SPDX>, © <holder>)
+
+and the project is listed below with its full licence text.
+
+Allowed sources: permissive licences only (MIT, BSD, Apache-2.0). Confirm the licence
+at the pinned commit before adapting. GPL/LGPL/AGPL sources (including python-kasa and
+plugp100) are never allowed. See CLAUDE.md rule 2 and docs/ARCHITECTURE.md decision 3.
+
+Entries
+-------
+
+None. No third-party code has been adapted into this repository as of 2026-11-01.
