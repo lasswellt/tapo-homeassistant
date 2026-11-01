@@ -15,8 +15,11 @@ from homeassistant.exceptions import DependencyError
 from homeassistant.helpers import discovery_flow
 from homeassistant.helpers.device_registry import format_mac
 from homeassistant.helpers.service_info.dhcp import DhcpServiceInfo
+from tapolink_proto.discovery import async_probe, build_query
 
-from .const import LOGGER, TPLINK_DOMAIN
+from .const import DOMAIN, LOGGER, TPLINK_DOMAIN
+
+_TDP_QUERY_KEY = "tdp_query"
 
 
 class OnboardOutcome(StrEnum):
@@ -28,6 +31,41 @@ class OnboardOutcome(StrEnum):
     AUTH_FAILED = "auth_failed"
     CANNOT_CONNECT = "cannot_connect"
     UNAVAILABLE = "unavailable"
+    IDENTITY_MISMATCH = "identity_mismatch"
+
+
+class IdentityResult(StrEnum):
+    """Outcome of the unicast TDP identity check."""
+
+    VERIFIED = "verified"
+    MISMATCH = "mismatch"
+    NO_REPLY = "no_reply"
+
+
+async def async_get_tdp_query(hass: HomeAssistant) -> bytes:
+    """Return the TDP probe packet, building it once (RSA keygen) per hass."""
+    store = hass.data.setdefault(DOMAIN, {})
+    query: bytes | None = store.get(_TDP_QUERY_KEY)
+    if query is None:
+        query = await hass.async_add_executor_job(build_query)
+        store[_TDP_QUERY_KEY] = query
+    return query
+
+
+async def async_verify_identity(
+    hass: HomeAssistant, *, host: str, mac: str, device_id: str
+) -> IdentityResult:
+    """Probe `host` and compare its TDP identity with the cloud's claim.
+
+    Must pass before any credential or stored credential hash reaches `host`.
+    """
+    info = await async_probe(host, query=await async_get_tdp_query(hass))
+    if info is None:
+        return IdentityResult.NO_REPLY
+    if info.matches_cloud_device(device_id) and info.matches_mac(mac):
+        return IdentityResult.VERIFIED
+    LOGGER.debug("identity mismatch for device with MAC %s", mac)
+    return IdentityResult.MISMATCH
 
 
 @callback
@@ -56,9 +94,26 @@ def async_tplink_entry_for_mac(hass: HomeAssistant, mac: str) -> ConfigEntry | N
 
 
 async def async_onboard_device(
-    hass: HomeAssistant, *, host: str, mac: str, username: str, password: str
+    hass: HomeAssistant,
+    *,
+    host: str,
+    mac: str,
+    device_id: str,
+    username: str,
+    password: str,
 ) -> OnboardOutcome:
-    """Drive core's `tplink` user flow for `host`, falling back to a card."""
+    """Drive core's `tplink` user flow for `host`, falling back to a card.
+
+    Credentials are only sent once the host proved the cloud-reported identity.
+    """
+    identity = await async_verify_identity(
+        hass, host=host, mac=mac, device_id=device_id
+    )
+    if identity is IdentityResult.MISMATCH:
+        return OnboardOutcome.IDENTITY_MISMATCH
+    if identity is IdentityResult.NO_REPLY:
+        async_request_host_update(hass, host=host, mac=mac)
+        return OnboardOutcome.HANDED_TO_USER
     flow = hass.config_entries.flow
     try:
         result = await flow.async_init(

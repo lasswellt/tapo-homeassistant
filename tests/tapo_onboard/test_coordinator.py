@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 from collections.abc import Iterator
+from contextlib import AbstractContextManager
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import patch
@@ -25,6 +27,7 @@ from tapolink_proto.cloud import (
     DeviceDetails,
     TokenExpired,
 )
+from tapolink_proto.discovery import TdpInfo
 
 if TYPE_CHECKING:
     from custom_components.tapo_onboard.coordinator import InventoryCoordinator
@@ -77,6 +80,23 @@ class FakeCloudClient:
     async def refresh(self, session: CloudSession) -> CloudSession:
         self.refresh_calls += 1
         return self.refreshed
+
+
+def _tdp(cloud_id: str, mac: str = STUB_MAC) -> TdpInfo:
+    info = TdpInfo.from_result(
+        {"device_id": hashlib.md5(cloud_id.encode()).hexdigest().upper(), "mac": mac}  # noqa: S324
+    )
+    assert info is not None
+    return info
+
+
+@pytest.fixture(autouse=True)
+def probe() -> Iterator[None]:
+    async def _fake(host: str, *, query: bytes, **_: object) -> TdpInfo | None:
+        return _tdp(f"id-{STUB_MAC}")
+
+    with patch("custom_components.tapo_onboard.onboarding.async_probe", _fake):
+        yield
 
 
 @pytest.fixture
@@ -283,3 +303,61 @@ async def test_reauth_result_picked_up_and_flag_reset(
         await coord.async_refresh()
         assert not coord.last_update_success
         assert reauth.call_count == 2
+
+
+def _probe_returns(info: TdpInfo | None) -> AbstractContextManager[object]:
+    async def _fake(host: str, *, query: bytes, **_: object) -> TdpInfo | None:
+        return info
+
+    return patch("custom_components.tapo_onboard.onboarding.async_probe", _fake)
+
+
+async def test_ip_repair_verified_updates_host(
+    hass: HomeAssistant, mod: ModuleType, stub: type[StubTplinkFlow]
+) -> None:
+    tp = _tplink(hass, ConfigEntryState.SETUP_RETRY)
+    client = FakeCloudClient([_device(STUB_MAC)], {STUB_MAC: "10.0.0.9"})
+    with _probe_returns(_tdp(f"id-{STUB_MAC}")):
+        state = await _coord(mod, hass, _entry(hass), client)._async_update_data()
+    await hass.async_block_till_done()
+    assert state.host_updates == (STUB_MAC,)
+    assert tp.data["host"] == "10.0.0.9"
+
+
+@pytest.mark.parametrize("info", [_tdp("other-device"), None])
+async def test_ip_repair_unverified_skipped(
+    hass: HomeAssistant,
+    mod: ModuleType,
+    stub: type[StubTplinkFlow],
+    info: TdpInfo | None,
+) -> None:
+    tp = _tplink(hass, ConfigEntryState.SETUP_RETRY)
+    client = FakeCloudClient([_device(STUB_MAC)], {STUB_MAC: "10.0.0.9"})
+    with _probe_returns(info):
+        state = await _coord(mod, hass, _entry(hass), client)._async_update_data()
+    await hass.async_block_till_done()
+    assert state.host_updates == ()
+    assert tp.data["host"] == "10.0.0.1"
+    assert stub.dhcp_infos == []
+
+
+async def test_new_device_no_password_mismatch_no_card(
+    hass: HomeAssistant, mod: ModuleType, stub: type[StubTplinkFlow]
+) -> None:
+    client = FakeCloudClient([_device(STUB_MAC)], {STUB_MAC: "10.0.0.5"})
+    with _probe_returns(_tdp("other-device")):
+        state = await _coord(mod, hass, _entry(hass), client)._async_update_data()
+    await hass.async_block_till_done()
+    assert state.outcomes[STUB_MAC] == "identity_mismatch"
+    assert stub.dhcp_infos == []
+
+
+async def test_new_device_no_password_no_reply_card(
+    hass: HomeAssistant, mod: ModuleType, stub: type[StubTplinkFlow]
+) -> None:
+    client = FakeCloudClient([_device(STUB_MAC)], {STUB_MAC: "10.0.0.5"})
+    with _probe_returns(None):
+        state = await _coord(mod, hass, _entry(hass), client)._async_update_data()
+    await hass.async_block_till_done()
+    assert state.outcomes[STUB_MAC] == "handed_to_user"
+    assert len(stub.dhcp_infos) == 1

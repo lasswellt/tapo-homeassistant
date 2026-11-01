@@ -306,6 +306,7 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
                 self.hass,
                 host=ip,
                 mac=device.mac,
+                device_id=device.device_id,
                 username=self._username,
                 password=self._password,
             )

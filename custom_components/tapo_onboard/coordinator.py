@@ -39,10 +39,12 @@ from .const import (
     UNSUPPORTED_IN_CORE_MODELS,
 )
 from .onboarding import (
+    IdentityResult,
     OnboardOutcome,
     async_onboard_device,
     async_request_host_update,
     async_tplink_entry_for_mac,
+    async_verify_identity,
 )
 
 _BROKEN_STATES = frozenset({ConfigEntryState.SETUP_RETRY, ConfigEntryState.SETUP_ERROR})
@@ -160,6 +162,12 @@ class InventoryCoordinator(DataUpdateCoordinator[InventoryState]):
                 if details is None or not details.ip:
                     continue
                 if details.ip != tplink_entry.data.get("host"):
+                    # Core logs in with stored credentials: identity first.
+                    verified = await async_verify_identity(
+                        self.hass, host=details.ip, mac=mac, device_id=device.device_id
+                    )
+                    if verified is not IdentityResult.VERIFIED:
+                        continue
                     async_request_host_update(self.hass, host=details.ip, mac=mac)
                     host_updates.append(mac)
                 continue
@@ -184,10 +192,17 @@ class InventoryCoordinator(DataUpdateCoordinator[InventoryState]):
                     self.hass,
                     host=details.ip,
                     mac=mac,
+                    device_id=device.device_id,
                     username=self._username,
                     password=password,
                 )
             else:
+                identity = await async_verify_identity(
+                    self.hass, host=details.ip, mac=mac, device_id=device.device_id
+                )
+                if identity is IdentityResult.MISMATCH:
+                    outcomes[mac] = OnboardOutcome.IDENTITY_MISMATCH
+                    continue
                 async_request_host_update(self.hass, host=details.ip, mac=mac)
                 outcomes[mac] = OnboardOutcome.HANDED_TO_USER
 

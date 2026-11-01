@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
 from collections.abc import Iterator
@@ -29,6 +30,7 @@ from tapolink_proto.cloud import (
     CloudUnavailable,
     DeviceDetails,
 )
+from tapolink_proto.discovery import TdpInfo
 
 DOMAIN = "tapo_onboard"
 DATA_PENDING_PASSWORD = "pending_password"
@@ -81,6 +83,20 @@ async def async_get_config_entry_diagnostics(
     mod = importlib.import_module("custom_components.tapo_onboard.diagnostics")
     diag: dict[str, Any] = await mod.async_get_config_entry_diagnostics(hass, entry)
     return diag
+
+
+@pytest.fixture(autouse=True)
+def probe() -> Iterator[None]:
+    async def _fake(host: str, *, query: bytes, **_: object) -> TdpInfo | None:
+        return TdpInfo.from_result(
+            {
+                "device_id": hashlib.md5(DEVICE_ID.encode()).hexdigest().upper(),
+                "mac": STUB_MAC,
+            }  # noqa: S324
+        )
+
+    with patch("custom_components.tapo_onboard.onboarding.async_probe", _fake):
+        yield
 
 
 @pytest.fixture(autouse=True)

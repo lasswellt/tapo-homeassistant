@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import ssl
 from collections.abc import Iterator
 from typing import cast
@@ -31,6 +32,7 @@ from tapolink_proto.cloud import (
     DeviceDetails,
     MfaRequired,
 )
+from tapolink_proto.discovery import TdpInfo
 
 DOMAIN = "tapo_onboard"
 DATA_PENDING_PASSWORD = "pending_password"
@@ -100,6 +102,20 @@ class FakeCloudClient:
         self, session: CloudSession, device: CloudDevice
     ) -> DeviceDetails:
         return DeviceDetails(ip="10.0.0.5", ssid=None, fw_ver=None)
+
+
+@pytest.fixture(autouse=True)
+def probe() -> Iterator[None]:
+    async def _fake(host: str, *, query: bytes, **_: object) -> TdpInfo | None:
+        return TdpInfo.from_result(
+            {
+                "device_id": hashlib.md5(f"id-{STUB_MAC}".encode()).hexdigest().upper(),
+                "mac": STUB_MAC,
+            }  # noqa: S324
+        )
+
+    with patch("custom_components.tapo_onboard.onboarding.async_probe", _fake):
+        yield
 
 
 @pytest.fixture(autouse=True)
