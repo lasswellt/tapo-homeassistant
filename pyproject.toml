@@ -1,0 +1,40 @@
+# Workspace root: dev/test tooling only, not a published package.
+[project]
+name = "tapo-homeassistant-workspace"
+version = "0.0.0"
+description = "uv workspace root for the Tapo/TP-Link Home Assistant integration"
+requires-python = ">=3.14"  # pytest-homeassistant-custom-component requires >=3.14
+license = "Apache-2.0"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pytest-homeassistant-custom-component",
+    "aioresponses",
+    "mypy",
+    "ruff",
+    "tapolink-proto",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+tapolink-proto = { workspace = true }
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests", "packages/tapolink-proto/tests"]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+
+[tool.ruff]
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
