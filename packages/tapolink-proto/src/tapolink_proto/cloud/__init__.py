@@ -12,6 +12,7 @@ from tapolink_proto.cloud.errors import (
     CloudUnavailable,
     DeviceOffline,
     MfaRequired,
+    RefreshTokenUnusable,
     TokenExpired,
     raise_for_error_code,
 )
@@ -34,6 +35,7 @@ __all__ = [
     "DeviceOffline",
     "LoginResult",
     "MfaRequired",
+    "RefreshTokenUnusable",
     "TokenExpired",
     "raise_for_error_code",
     "PinnedCertificateError",

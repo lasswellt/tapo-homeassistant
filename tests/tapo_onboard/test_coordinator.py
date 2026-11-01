@@ -28,6 +28,7 @@ from tapolink_proto.cloud import (
     CloudSession,
     DeviceDetails,
     DeviceOffline,
+    RefreshTokenUnusable,
     TokenExpired,
 )
 from tapolink_proto.discovery import TdpInfo
@@ -397,7 +398,7 @@ async def test_refresh_unusable_starts_reauth(
 ) -> None:
     client = FakeCloudClient([], {})
     client.list_errors = [TokenExpired(-20651)]
-    client.refresh_error = CloudResponseError("no refresh token")
+    client.refresh_error = RefreshTokenUnusable("no refresh token")
     coord: Any = _coord(mod, hass, _entry(hass), client)
     with patch("homeassistant.config_entries.ConfigEntry.async_start_reauth") as reauth:
         await coord.async_refresh()
@@ -459,3 +460,38 @@ async def test_details_rate_limited_stops_cycle(
     assert not coord.last_update_success
     assert coord.last_exception.retry_after == 60
     assert coord.last_exception.translation_key == "rate_limited"
+
+
+async def test_refresh_transient_failure_no_reauth(
+    hass: HomeAssistant, mod: ModuleType, stub: type[StubTplinkFlow]
+) -> None:
+    client = FakeCloudClient([], {})
+    client.list_errors = [TokenExpired(-20651)]
+    client.refresh_error = CloudResponseError("HTTP 503 from gateway")
+    coord: Any = _coord(mod, hass, _entry(hass), client)
+    with patch("homeassistant.config_entries.ConfigEntry.async_start_reauth") as reauth:
+        await coord.async_refresh()
+    assert not coord.last_update_success
+    assert coord.last_exception.translation_key == "cloud_unavailable"
+    reauth.assert_not_called()
+
+
+async def test_onboard_exception_isolated(
+    hass: HomeAssistant, mod: ModuleType, stub: type[StubTplinkFlow]
+) -> None:
+    client = FakeCloudClient(
+        [_device(MAC2), _device(STUB_MAC)], {MAC2: "10.0.0.2", STUB_MAC: "10.0.0.5"}
+    )
+
+    async def _probe(host: str, *, query: bytes, **_: object) -> TdpInfo | None:
+        if host == "10.0.0.2":
+            raise RuntimeError("boom")
+        return _tdp(f"id-{STUB_MAC}")
+
+    coord = _coord(mod, hass, _entry(hass), client, password="secret")
+    with patch("custom_components.tapo_onboard.onboarding.async_probe", _probe):
+        await coord.async_refresh()
+    assert coord.last_update_success
+    assert coord.data.outcomes[MAC2].value == "cannot_connect"
+    assert coord.data.outcomes[STUB_MAC].value == "added"
+    assert len(hass.config_entries.async_entries("tplink")) == 1

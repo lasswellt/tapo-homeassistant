@@ -49,6 +49,10 @@ class CloudResponseError(CloudError):
         super().__init__(code, message)
 
 
+class RefreshTokenUnusable(CloudResponseError):
+    """The session has no refresh token, or the refresh returned no token."""
+
+
 class CloudUnavailable(CloudError):
     """Transport or network failure."""
 

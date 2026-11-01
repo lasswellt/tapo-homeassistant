@@ -21,6 +21,7 @@ from tapolink_proto.cloud import (
     CloudSession,
     CloudUnavailable,
     MfaRequired,
+    RefreshTokenUnusable,
 )
 
 GW = "https://n-wap-gw.tplinkcloud.com"
@@ -238,3 +239,8 @@ async def test_non_numeric_error_code_device_details(
     )
     with pytest.raises(CloudResponseError):
         await client.device_details(SESSION, dev)
+
+
+async def test_refresh_without_token_is_unusable(client: CloudClient) -> None:
+    with pytest.raises(RefreshTokenUnusable):
+        await client.refresh(CloudSession("tok", None, 7))

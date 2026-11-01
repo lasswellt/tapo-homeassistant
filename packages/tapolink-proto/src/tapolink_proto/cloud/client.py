@@ -17,6 +17,7 @@ from tapolink_proto.cloud.errors import (
     CloudResponseError,
     CloudUnavailable,
     MfaRequired,
+    RefreshTokenUnusable,
     raise_for_error_code,
 )
 from tapolink_proto.cloud.models import CloudDevice, DeviceDetails, LoginResult
@@ -192,10 +193,10 @@ class CloudClient:
         """Swap the token using the refresh token; the refresh token is kept.
 
         Raises:
-            CloudResponseError: the session has no refresh token or none returned.
+            RefreshTokenUnusable: the session has no refresh token or none returned.
         """
         if session.refresh_token is None:
-            raise CloudResponseError("session has no refresh token")
+            raise RefreshTokenUnusable("session has no refresh token")
         result = await self._post(
             "api/v2/account/refreshToken",
             {
@@ -207,7 +208,7 @@ class CloudClient:
         )
         token = result.get("token")
         if not isinstance(token, str) or not token:
-            raise CloudResponseError("refresh response has no token")
+            raise RefreshTokenUnusable("refresh response has no token")
         return CloudSession(token, session.refresh_token, session.account_id)
 
     async def list_devices(self, session: CloudSession) -> list[CloudDevice]:

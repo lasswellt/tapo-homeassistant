@@ -22,9 +22,9 @@ from tapolink_proto.cloud import (
     CloudDevice,
     CloudError,
     CloudRateLimited,
-    CloudResponseError,
     CloudSession,
     DeviceDetails,
+    RefreshTokenUnusable,
     TokenExpired,
 )
 
@@ -118,8 +118,9 @@ class InventoryCoordinator(DataUpdateCoordinator[InventoryState]):
             except TokenExpired:
                 try:
                     self._session = await self._client.refresh(self._session)
-                except CloudResponseError as exc:
-                    # No refresh token / none returned: credentials unusable.
+                except RefreshTokenUnusable as exc:
+                    # Only an unusable refresh token means reauth; other
+                    # refresh errors are transient (UpdateFailed upstream).
                     raise self._start_reauth() from exc
                 self.hass.config_entries.async_update_entry(
                     self._entry,
@@ -202,14 +203,18 @@ class InventoryCoordinator(DataUpdateCoordinator[InventoryState]):
                 continue
             password = self._password()
             if password:
-                outcomes[mac] = await async_onboard_device(
-                    self.hass,
-                    host=details.ip,
-                    mac=mac,
-                    device_id=device.device_id,
-                    username=self._username,
-                    password=password,
-                )
+                try:
+                    outcomes[mac] = await async_onboard_device(
+                        self.hass,
+                        host=details.ip,
+                        mac=mac,
+                        device_id=device.device_id,
+                        username=self._username,
+                        password=password,
+                    )
+                except Exception as exc:  # noqa: BLE001 - isolate one device
+                    LOGGER.debug("onboarding %s failed: %s", mac, type(exc).__name__)
+                    outcomes[mac] = OnboardOutcome.CANNOT_CONNECT
                 if outcomes[mac] in _TERMINAL:
                     self._attempted.add(mac)
             else:
