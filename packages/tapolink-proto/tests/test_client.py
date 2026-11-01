@@ -55,7 +55,7 @@ async def client() -> AsyncIterator[CloudClient]:
 
 def device(i: int, region: str = "us-east-1") -> dict[str, str]:
     return {
-        "deviceId": f"id{i}",
+        "deviceId": f"{i:040X}",
         "deviceMac": f"AA-BB-CC-DD-{i // 256:02X}-{i % 256:02X}",
         "deviceModel": "P110(US)",
         "deviceName": "P110",
@@ -167,13 +167,43 @@ async def test_rate_limited(mocked: aioresponses, client: CloudClient) -> None:
 async def test_device_details(mocked: aioresponses, client: CloudClient) -> None:
     dev = CloudDevice.from_api(device(1))
     mocked.get(
-        "https://use1-app-server.iot.i.tplinknbu.com/v1/things/id1/details",
+        "https://use1-app-server.iot.i.tplinknbu.com/v1/things/0000000000000000000000000000000000000001/details",
         payload={"ip": "192.168.1.20", "ssid": "home", "fwVer": "1.2"},
     )
     details = await client.device_details(SESSION, dev)
     assert details.ip == "192.168.1.20"
     call = next(iter(mocked.requests.values()))[0]
     assert call.kwargs["headers"]["Authorization"] == "ut|tok"
+
+
+async def test_list_devices_skips_malformed(
+    mocked: aioresponses, client: CloudClient
+) -> None:
+    bad = device(2)
+    bad["deviceId"] = "not-hex"
+    mocked.post(
+        url("api/v2/common/getDeviceListByPage"),
+        payload={
+            "error_code": 0,
+            "result": {"deviceList": [device(1), bad, device(3)], "totalNum": 3},
+        },
+    )
+    devices = await client.list_devices(SESSION)
+    assert [d.device_id for d in devices] == [f"{1:040X}", f"{3:040X}"]
+
+
+async def test_malicious_region_uses_default_host(
+    mocked: aioresponses, client: CloudClient
+) -> None:
+    dev = CloudDevice.from_api(device(1, region="evil.com/x-e-1"))
+    mocked.get(
+        f"https://use1-app-server.iot.i.tplinknbu.com/v1/things/{1:040X}/details",
+        payload={"ip": "192.168.1.20"},
+    )
+    await client.device_details(SESSION, dev)
+    call = next(iter(mocked.requests.values()))[0]
+    assert call.kwargs["headers"]["Authorization"] == "ut|tok"
+    assert all("evil.com" not in str(k[1]) for k in mocked.requests)
 
 
 async def test_transport_failure(mocked: aioresponses, client: CloudClient) -> None:

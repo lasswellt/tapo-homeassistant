@@ -17,6 +17,8 @@ from typing import Any
 from tapolink_proto.cloud.errors import CloudResponseError
 
 _MAC_RE = re.compile(r"[0-9a-f]{12}")
+_DEVICE_ID_RE = re.compile(r"[0-9A-Fa-f]{32,64}")
+_REGION_CODE_RE = re.compile(r"[a-z]{2}[a-z][0-9]")
 
 
 def _opt_str(data: Mapping[str, Any], key: str) -> str | None:
@@ -60,20 +62,24 @@ class CloudDevice:
         if self.region is None:
             return None
         parts = self.region.split("-")
-        if len(parts) < 3:
+        if len(parts) != 3 or not all(parts):
             return None
-        return parts[0] + parts[1][0] + parts[-1]
+        country, area, num = parts
+        code = country + area[0] + num
+        return code if _REGION_CODE_RE.fullmatch(code) else None
 
     @classmethod
     def from_api(cls, data: Mapping[str, Any]) -> "CloudDevice":
         """Build from a raw API entry.
 
         Raises:
-            CloudResponseError: deviceId or MAC missing, or MAC malformed.
+            CloudResponseError: deviceId or MAC missing or malformed.
         """
         device_id = _opt_str(data, "deviceId")
         if device_id is None:
             raise CloudResponseError("device entry has no deviceId")
+        if not _DEVICE_ID_RE.fullmatch(device_id):
+            raise CloudResponseError("deviceId is not hex")
         raw_mac = _opt_str(data, "deviceMac") or _opt_str(data, "mac")
         if raw_mac is None:
             raise CloudResponseError("device entry has no MAC")
@@ -109,7 +115,14 @@ class DeviceDetails:
         raw_ip = data.get("ip")
         if isinstance(raw_ip, str):
             try:
-                if ipaddress.IPv4Address(raw_ip).is_private:
+                addr = ipaddress.IPv4Address(raw_ip)
+                if addr.is_private and not (
+                    addr.is_loopback
+                    or addr.is_link_local
+                    or addr.is_multicast
+                    or addr.is_unspecified
+                    or addr.is_reserved
+                ):
                     ip = raw_ip
             except ipaddress.AddressValueError:
                 ip = None

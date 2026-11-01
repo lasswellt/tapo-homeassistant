@@ -71,6 +71,13 @@ def test_region_code(region: str, code: str) -> None:
     assert dev.region_code == code
 
 
+@pytest.mark.parametrize(
+    "region", ["evil.com/x-e-1", "us--1", "a-b", "us-east-1-x", "-east-1", "US-east-1"]
+)
+def test_region_code_rejects_malformed(region: str) -> None:
+    assert CloudDevice.from_api(_entry(deviceRegion=region)).region_code is None
+
+
 def test_region_absent() -> None:
     d = _entry()
     del d["deviceRegion"]
@@ -86,6 +93,10 @@ def test_from_api_errors() -> None:
         CloudDevice.from_api(_entry(deviceMac="ZZ0B0C0D0E0F"))
     with pytest.raises(CloudResponseError):
         CloudDevice.from_api(_entry(deviceMac="0A0B"))
+    with pytest.raises(CloudResponseError):
+        CloudDevice.from_api(_entry(deviceId="../evil" + "A" * 32))
+    with pytest.raises(CloudResponseError):
+        CloudDevice.from_api(_entry(deviceId="AB" * 3))
     m = _entry()
     del m["deviceMac"]
     with pytest.raises(CloudResponseError):
@@ -97,6 +108,8 @@ def test_details_ip_filtering() -> None:
     assert (keep.ip, keep.ssid, keep.fw_ver) == ("192.168.1.50", "net", "1")
     assert DeviceDetails.from_api({"ip": "8.8.8.8"}).ip is None
     assert DeviceDetails.from_api({"ip": "garbage"}).ip is None
+    for bad in ("127.0.0.1", "169.254.1.1", "0.0.0.0", "224.0.0.1"):
+        assert DeviceDetails.from_api({"ip": bad}).ip is None
     assert DeviceDetails.from_api({}).ip is None
 
 

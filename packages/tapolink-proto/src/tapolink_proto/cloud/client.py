@@ -4,7 +4,9 @@
 """TP-Link cloud client: login, MFA, refresh, device list, device details."""
 
 import json
+import logging
 import ssl
+import urllib.parse
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -27,6 +29,8 @@ from tapolink_proto.cloud.signing import (
     query_params,
     sign_request,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 GLOBAL_GATEWAY = "https://n-wap-gw.tplinkcloud.com"
 DEFAULT_REGION_CODE = "use1"
@@ -212,7 +216,11 @@ class CloudClient:
             )
             page = result.get("deviceList")
             entries = [d for d in page if isinstance(d, dict)] if page else []
-            devices.extend(CloudDevice.from_api(d) for d in entries)
+            for entry in entries:
+                try:
+                    devices.append(CloudDevice.from_api(entry))
+                except CloudResponseError:
+                    _LOGGER.debug("skipping malformed device entry")
             index += len(entries)
             total = result.get("totalNum")
             if not entries or not isinstance(total, int) or index >= total:
@@ -223,7 +231,9 @@ class CloudClient:
     ) -> DeviceDetails:
         """Read ``things/<id>/details`` from the device's regional IoT host."""
         region = device.region_code or DEFAULT_REGION_CODE
-        url = DETAILS_URL.format(region=region, device_id=device.device_id)
+        url = DETAILS_URL.format(
+            region=region, device_id=urllib.parse.quote(device.device_id, safe="")
+        )
         headers = {
             "Authorization": f"ut|{session.token}",
             "app-cid": f"app:{APP_TYPE}:{self._terminal_uuid}",
