@@ -301,6 +301,9 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
         for device in self._devices:
             if device.mac not in self._selected:
                 continue
+            if async_tplink_entry_for_mac(self.hass, device.mac) is not None:
+                self._outcomes[device.mac] = OnboardOutcome.ALREADY_CONFIGURED
+                continue
             try:
                 details = await self._client.device_details(self._session, device)
                 ip = details.ip

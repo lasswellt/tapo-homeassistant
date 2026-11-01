@@ -214,7 +214,6 @@ async def test_happy_path(hass: HomeAssistant) -> None:
     assert data["ignored_macs"] == sorted([MAC_UNSUP, MAC_ALREADY])
     assert result["title"] == EMAIL.lower()
     assert hass.data[DOMAIN][DATA_PENDING_PASSWORD][EMAIL.lower()] == PASSWORD
-    # stub tplink: first device added; the second hits the same host (aborts).
     tplink = hass.config_entries.async_entries("tplink")
     assert any(e.data == {"host": "10.0.0.5"} for e in tplink)
     # both ticked devices were really added, as distinct tplink entries.
@@ -390,3 +389,47 @@ async def test_identity_mismatch_starts_no_flow(
     tplink = hass.config_entries.async_entries("tplink")
     assert [e.unique_id for e in tplink] == [format_mac(STUB_MAC)]
     assert not hass.config_entries.flow.async_progress_by_handler("tplink")
+
+
+async def test_ticked_device_already_in_tplink_is_skipped(
+    hass: HomeAssistant, fake_cloud: type[FakeCloudClient]
+) -> None:
+    MockConfigEntry(
+        domain="tplink", unique_id=format_mac(MAC_ALREADY), data={"host": "10.0.0.9"}
+    ).add_to_hass(hass)
+    result = await _run(hass, [STUB_MAC, MAC_ALREADY])
+    assert result["description_placeholders"] == {
+        "added": "1",
+        "confirm": "0",
+        "already": "1",
+        "failed": "0",
+    }
+    assert fake_cloud.details_calls == [STUB_MAC]
+    tplink = hass.config_entries.async_entries("tplink")
+    assert sorted(e.unique_id or "" for e in tplink) == sorted(
+        [format_mac(STUB_MAC), format_mac(MAC_ALREADY)]
+    )
+
+
+async def test_cannot_connect_counts_failed(hass: HomeAssistant) -> None:
+    StubTplinkFlow.connect_result = "cannot_connect"
+    result = await _run(hass, [STUB_MAC])
+    assert result["description_placeholders"] == {
+        "added": "0",
+        "confirm": "0",
+        "already": "0",
+        "failed": "1",
+    }
+    assert not hass.config_entries.async_entries("tplink")
+
+
+async def test_auth_failed_counts_under_confirm(hass: HomeAssistant) -> None:
+    StubTplinkFlow.connect_result = "auth"
+    StubTplinkFlow.valid_password = "other"
+    result = await _run(hass, [STUB_MAC])
+    assert result["description_placeholders"] == {
+        "added": "0",
+        "confirm": "1",
+        "already": "0",
+        "failed": "0",
+    }
