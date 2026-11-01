@@ -1,0 +1,15 @@
+{
+  "domain": "tapo_onboard",
+  "name": "Tapo Cloud Onboarding for TP-Link Smart Home",
+  "codeowners": ["@lasswellt"],
+  "config_flow": true,
+  "dependencies": ["dhcp"],
+  "after_dependencies": ["tplink"],
+  "documentation": "https://github.com/lasswellt/tapo-homeassistant",
+  "issue_tracker": "https://github.com/lasswellt/tapo-homeassistant/issues",
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "loggers": ["tapolink_proto"],
+  "requirements": ["tapolink-proto==0.1.0"],
+  "version": "0.1.0"
+}
