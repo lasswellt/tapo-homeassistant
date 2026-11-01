@@ -13,8 +13,8 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from tapolink_proto.cloud import CloudClient, build_cloud_ssl_context
 
-from .const import CONF_TERMINAL_UUID, DATA_PENDING_PASSWORD, DOMAIN
-from .coordinator import InventoryCoordinator
+from .const import CONF_TERMINAL_UUID, DATA_FLOW_RESULT, DATA_PENDING_PASSWORD, DOMAIN
+from .coordinator import FlowResult, InventoryCoordinator
 
 
 @dataclass(slots=True)
@@ -36,6 +36,13 @@ def _handoff(hass: HomeAssistant) -> dict[str, str]:
     return handoff
 
 
+def _flow_results(hass: HomeAssistant) -> dict[str, FlowResult]:
+    results: dict[str, FlowResult] = hass.data.setdefault(DOMAIN, {}).setdefault(
+        DATA_FLOW_RESULT, {}
+    )
+    return results
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: TapoOnboardConfigEntry) -> bool:
     """Set up the entry; the cloud is off the critical path."""
     ssl_ctx = await hass.async_add_executor_job(build_cloud_ssl_context)
@@ -45,6 +52,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: TapoOnboardConfigEntry) 
         terminal_uuid=entry.data[CONF_TERMINAL_UUID],
     )
     handoff = _handoff(hass)
+    flow_results = _flow_results(hass)
     runtime: TapoOnboardRuntimeData
 
     def password() -> str | None:
@@ -59,12 +67,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: TapoOnboardConfigEntry) 
         client,
         password=password,
         username=entry.data[CONF_USERNAME],
+        flow_result=flow_results.pop(entry.unique_id or "", None),
     )
     runtime = TapoOnboardRuntimeData(client, coordinator)
     entry.runtime_data = runtime
 
     def _drop_handoff() -> None:
         handoff.pop(entry.unique_id or "", None)
+        flow_results.pop(entry.unique_id or "", None)
 
     entry.async_on_unload(_drop_handoff)
 

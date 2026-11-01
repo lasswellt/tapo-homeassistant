@@ -11,11 +11,13 @@ entries that failed to set up (IP repair) and for devices not yet seen.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 from tapolink_proto.cloud import (
     CloudAuthError,
     CloudClient,
@@ -33,6 +35,7 @@ from .const import (
     CONF_IGNORED_MACS,
     CONF_REFRESH_TOKEN,
     CONF_TOKEN,
+    DETAILS_FLOOR,
     DOMAIN,
     INVENTORY_INTERVAL,
     LOGGER,
@@ -59,6 +62,14 @@ _TERMINAL = frozenset(
 )
 
 
+@dataclass(slots=True)
+class FlowResult:
+    """What the config flow already did, handed to setup in memory only."""
+
+    outcomes: dict[str, OnboardOutcome] = field(default_factory=dict)
+    details_at: dict[str, datetime] = field(default_factory=dict)
+
+
 @dataclass(frozen=True, slots=True)
 class InventoryState:
     """Result of one inventory cycle."""
@@ -79,6 +90,7 @@ class InventoryCoordinator(DataUpdateCoordinator[InventoryState]):
         *,
         password: Callable[[], str | None],
         username: str,
+        flow_result: FlowResult | None = None,
     ) -> None:
         super().__init__(
             hass,
@@ -93,6 +105,14 @@ class InventoryCoordinator(DataUpdateCoordinator[InventoryState]):
         self._password = password
         self._username = username
         self._attempted: set[str] = set()
+        self._details_not_before: dict[str, datetime] = {}
+        if flow_result is not None:
+            self._attempted.update(
+                mac for mac, o in flow_result.outcomes.items() if o in _TERMINAL
+            )
+            self._details_not_before.update(
+                (mac, at + DETAILS_FLOOR) for mac, at in flow_result.details_at.items()
+            )
         self._reauth_started = False
         self._session = self._session_from_entry()
 
@@ -136,7 +156,16 @@ class InventoryCoordinator(DataUpdateCoordinator[InventoryState]):
             raise self._start_reauth() from exc
 
     async def _details(self, device: CloudDevice) -> DeviceDetails | None:
-        """Fetch details; a per-device failure skips only that device."""
+        """Fetch details; a per-device failure skips only that device.
+
+        Skipped (None) until `DETAILS_FLOOR` after this device's previous call,
+        whether the flow or this coordinator made it (rule 3).
+        """
+        now = dt_util.utcnow()
+        not_before = self._details_not_before.get(device.mac)
+        if not_before is not None and now < not_before:
+            return None
+        self._details_not_before[device.mac] = now + DETAILS_FLOOR
         try:
             return await self._call(lambda s: self._client.device_details(s, device))
         except CloudRateLimited:

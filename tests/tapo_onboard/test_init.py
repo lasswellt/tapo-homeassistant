@@ -8,14 +8,17 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import ssl
 from collections.abc import Iterator
 from datetime import timedelta
 from typing import Any
 from unittest.mock import patch
 
 import pytest
+from freezegun.api import FrozenDateTimeFactory
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
+from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
@@ -224,3 +227,121 @@ async def test_coordinator_stops_polling_after_unload(hass: HomeAssistant) -> No
     async_fire_time_changed(hass, dt_util.utcnow() + timedelta(minutes=31))
     await hass.async_block_till_done()
     assert FakeCloudClient.calls == calls
+
+
+MAC_ONE = "11:22:33:44:55:01"
+MAC_TWO = "11:22:33:44:55:02"
+FLOW_HOSTS = {MAC_ONE: "10.0.0.1", MAC_TWO: "10.0.0.2"}
+
+
+class FlowCloudClient:
+    """Two-device cloud fake that records every device_details call."""
+
+    details_calls: list[str] = []
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        pass
+
+    async def login(self, username: str, password: str) -> CloudSession:
+        return CloudSession("tok", "ref", 42)
+
+    async def list_devices(self, session: CloudSession) -> list[CloudDevice]:
+        return [
+            CloudDevice(
+                device_id=DEVICE_ID,
+                mac=mac,
+                alias=mac,
+                model="P110",
+                model_base="P110",
+                device_type="SMART.TAPOPLUG",
+                hw_ver="1",
+                fw_ver="1",
+                region=None,
+                role=None,
+            )
+            for mac in FLOW_HOSTS
+        ]
+
+    async def device_details(
+        self, session: CloudSession, device: CloudDevice
+    ) -> DeviceDetails:
+        type(self).details_calls.append(device.mac)
+        return DeviceDetails(ip=FLOW_HOSTS[device.mac], ssid=None, fw_ver=None)
+
+
+@pytest.fixture
+def flow_env(hass: HomeAssistant) -> Iterator[list[str]]:
+    """Patch cloud client + probe for flow-then-setup; yields probed hosts."""
+    FlowCloudClient.details_calls = []
+    probed: list[str] = []
+    host_macs = {host: mac for mac, host in FLOW_HOSTS.items()}
+
+    async def _probe(host: str, *, query: bytes, **_: object) -> TdpInfo | None:
+        probed.append(host)
+        return TdpInfo.from_result(
+            {
+                "device_id": hashlib.md5(DEVICE_ID.encode()).hexdigest().upper(),
+                "mac": host_macs[host],
+            }  # noqa: S324
+        )
+
+    StubTplinkFlow.host_macs = host_macs
+    with (
+        patch("custom_components.tapo_onboard.onboarding.async_probe", _probe),
+        patch(
+            "custom_components.tapo_onboard.config_flow.CloudClient", FlowCloudClient
+        ),
+        patch("custom_components.tapo_onboard.CloudClient", FlowCloudClient),
+        patch(
+            "custom_components.tapo_onboard.config_flow.build_cloud_ssl_context",
+            lambda: ssl.create_default_context(),
+        ),
+    ):
+        yield probed
+
+
+async def _run_flow(hass: HomeAssistant) -> None:
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": "user"}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"username": EMAIL, "password": "secret"}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"devices": list(FLOW_HOSTS)}
+    )
+    while result["type"] == FlowResultType.SHOW_PROGRESS:
+        await hass.async_block_till_done()
+        result = await hass.config_entries.flow.async_configure(result["flow_id"])
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    await hass.async_block_till_done()
+
+
+async def test_details_called_once_per_device_across_flow_and_setup(
+    hass: HomeAssistant, flow_env: list[str]
+) -> None:
+    StubTplinkFlow.connect_result = "cannot_connect"
+    await _run_flow(hass)
+    assert sorted(FlowCloudClient.details_calls) == sorted(FLOW_HOSTS)
+
+
+async def test_auth_failed_device_not_logged_in_again_on_setup(
+    hass: HomeAssistant, flow_env: list[str]
+) -> None:
+    StubTplinkFlow.connect_result = "auth"
+    StubTplinkFlow.valid_password = "other"
+    await _run_flow(hass)
+    assert sorted(FlowCloudClient.details_calls) == sorted(FLOW_HOSTS)
+    assert sorted(flow_env) == sorted(FLOW_HOSTS.values())
+
+
+async def test_cannot_connect_device_retried_after_floor(
+    hass: HomeAssistant, flow_env: list[str], freezer: FrozenDateTimeFactory
+) -> None:
+    StubTplinkFlow.connect_result = "cannot_connect"
+    await _run_flow(hass)
+    assert len(FlowCloudClient.details_calls) == 2
+    freezer.tick(timedelta(minutes=31))
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+    assert sorted(FlowCloudClient.details_calls) == sorted([*FLOW_HOSTS, *FLOW_HOSTS])

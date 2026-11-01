@@ -12,6 +12,8 @@ DOMAIN: Final = "tapo_onboard"
 TPLINK_DOMAIN: Final = "tplink"
 
 INVENTORY_INTERVAL: Final = timedelta(minutes=30)
+# Minimum gap between two device_details calls for one device (rule 3).
+DETAILS_FLOOR: Final = timedelta(minutes=15)
 
 CONF_TERMINAL_UUID: Final = "terminal_uuid"
 CONF_TOKEN: Final = "token"
@@ -21,6 +23,8 @@ CONF_IGNORED_MACS: Final = "ignored_macs"
 
 # hass.data key for the in-memory password handoff from the flow to setup.
 DATA_PENDING_PASSWORD: Final = "pending_password"
+# hass.data key for the in-memory flow outcomes handed to the coordinator.
+DATA_FLOW_RESULT: Final = "flow_result"
 
 LOGGER: Final = logging.getLogger(__package__)
 

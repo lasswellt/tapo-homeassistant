@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Mapping
+from datetime import datetime
 from enum import StrEnum
 from typing import Any
 from uuid import uuid4
@@ -24,6 +25,7 @@ from homeassistant.helpers.selector import (
     TextSelectorConfig,
     TextSelectorType,
 )
+from homeassistant.util import dt as dt_util
 from tapolink_proto.cloud import (
     CloudAuthError,
     CloudClient,
@@ -43,12 +45,14 @@ from .const import (
     CONF_REFRESH_TOKEN,
     CONF_TERMINAL_UUID,
     CONF_TOKEN,
+    DATA_FLOW_RESULT,
     DATA_PENDING_PASSWORD,
     DOMAIN,
     LOGGER,
     PARTIAL_IN_CORE_MODELS,
     UNSUPPORTED_IN_CORE_MODELS,
 )
+from .coordinator import FlowResult
 from .onboarding import OnboardOutcome, async_onboard_device, async_tplink_entry_for_mac
 
 CONF_CODE = "code"
@@ -79,6 +83,7 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
         self._selected: set[str] = set()
         self._ignored: list[str] = []
         self._outcomes: dict[str, OnboardOutcome] = {}
+        self._details_at: dict[str, datetime] = {}
         self._task: asyncio.Task[None] | None = None
         self._reauth = False
 
@@ -304,6 +309,7 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
             if async_tplink_entry_for_mac(self.hass, device.mac) is not None:
                 self._outcomes[device.mac] = OnboardOutcome.ALREADY_CONFIGURED
                 continue
+            self._details_at[device.mac] = dt_util.utcnow()
             try:
                 details = await self._client.device_details(self._session, device)
                 ip = details.ip
@@ -352,6 +358,9 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
         self.hass.data.setdefault(DOMAIN, {}).setdefault(DATA_PENDING_PASSWORD, {})[
             unique_id
         ] = self._password
+        self.hass.data[DOMAIN].setdefault(DATA_FLOW_RESULT, {})[unique_id] = FlowResult(
+            outcomes=dict(self._outcomes), details_at=dict(self._details_at)
+        )
         outcomes = list(self._outcomes.values())
         added = outcomes.count(OnboardOutcome.ADDED)
         confirm = outcomes.count(OnboardOutcome.HANDED_TO_USER) + outcomes.count(

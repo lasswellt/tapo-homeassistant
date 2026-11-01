@@ -9,11 +9,13 @@ import hashlib
 import importlib
 from collections.abc import Iterator
 from contextlib import AbstractContextManager
+from datetime import timedelta
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import patch
 
 import pytest
+from freezegun.api import FrozenDateTimeFactory
 from homeassistant.config_entries import SOURCE_DHCP, ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import format_mac
@@ -241,11 +243,15 @@ async def test_attempted_not_retried(
 
 
 async def test_no_ip_device_retried(
-    hass: HomeAssistant, mod: ModuleType, stub: type[StubTplinkFlow]
+    hass: HomeAssistant,
+    mod: ModuleType,
+    stub: type[StubTplinkFlow],
+    freezer: FrozenDateTimeFactory,
 ) -> None:
     client = FakeCloudClient([_device(MAC2)], {MAC2: None})
     coord = _coord(mod, hass, _entry(hass), client, password="secret")
     await coord.async_refresh()
+    freezer.tick(timedelta(minutes=31))
     await coord.async_refresh()
     assert client.details_calls == [MAC2, MAC2]
 
@@ -374,7 +380,10 @@ async def test_new_device_no_password_mismatch_no_card(
 
 
 async def test_new_device_no_password_no_reply_no_flow_retried(
-    hass: HomeAssistant, mod: ModuleType, stub: type[StubTplinkFlow]
+    hass: HomeAssistant,
+    mod: ModuleType,
+    stub: type[StubTplinkFlow],
+    freezer: FrozenDateTimeFactory,
 ) -> None:
     client = FakeCloudClient([_device(STUB_MAC)], {STUB_MAC: "10.0.0.5"})
     coord = _coord(mod, hass, _entry(hass), client)
@@ -384,9 +393,11 @@ async def test_new_device_no_password_no_reply_no_flow_retried(
         assert STUB_MAC not in state.outcomes
         assert stub.dhcp_infos == []
         assert hass.config_entries.flow.async_progress_by_handler("tplink") == []
+        freezer.tick(timedelta(minutes=31))
         await coord._async_update_data()
     assert client.details_calls == [STUB_MAC, STUB_MAC]
     assert stub.dhcp_infos == []
+    freezer.tick(timedelta(minutes=31))
     state = await coord._async_update_data()
     await hass.async_block_till_done()
     assert state.outcomes[STUB_MAC] == "handed_to_user"
@@ -434,7 +445,10 @@ async def test_list_app_version_too_old_no_raw_exception(
 
 
 async def test_cannot_connect_retried_then_added_not(
-    hass: HomeAssistant, mod: ModuleType, stub: type[StubTplinkFlow]
+    hass: HomeAssistant,
+    mod: ModuleType,
+    stub: type[StubTplinkFlow],
+    freezer: FrozenDateTimeFactory,
 ) -> None:
     client = FakeCloudClient([_device(STUB_MAC)], {STUB_MAC: "10.0.0.5"})
     coord = _coord(mod, hass, _entry(hass), client, password="secret")
@@ -442,6 +456,7 @@ async def test_cannot_connect_retried_then_added_not(
     await coord.async_refresh()
     assert coord.data.outcomes[STUB_MAC].value == "cannot_connect"
     stub.connect_result = "ok"
+    freezer.tick(timedelta(minutes=31))
     await coord.async_refresh()
     assert client.details_calls == [STUB_MAC, STUB_MAC]
     assert coord.data.outcomes[STUB_MAC].value == "added"
