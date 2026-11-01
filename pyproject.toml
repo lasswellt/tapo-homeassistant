@@ -32,6 +32,9 @@ testpaths = ["tests", "packages/tapolink-proto/tests"]
 [tool.mypy]
 python_version = "3.14"
 strict = true
+# custom_components/ is a namespace package (no __init__.py by design, see
+# tests/conftest.py); resolve modules from the repo root so relative imports work.
+explicit_package_bases = true
 
 [tool.ruff]
 target-version = "py313"
