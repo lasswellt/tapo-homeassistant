@@ -1,0 +1,51 @@
+# Publishes tapolink-proto to PyPI when a GitHub release is published.
+# PyPI trusted publishing (OIDC): no API token is stored anywhere.
+name: Publish tapolink-proto
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Tag, library and integration versions must agree
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          lib=$(grep -m1 '^version = ' packages/tapolink-proto/pyproject.toml | cut -d'"' -f2)
+          integ=$(jq -r .version custom_components/tapo_onboard/manifest.json)
+          req=$(jq -r '.requirements[] | select(startswith("tapolink-proto=="))' custom_components/tapo_onboard/manifest.json)
+          echo "tag=$tag lib=$lib integration=$integ requirement=$req"
+          test "$tag" = "$lib" && test "$tag" = "$integ" && test "$req" = "tapolink-proto==$lib"
+      - name: Test
+        run: |
+          uv sync --all-packages
+          uv run pytest packages/tapolink-proto/tests -q
+          uv run pytest tests -q
+      - name: Build
+        run: uv build packages/tapolink-proto --out-dir dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/tapolink-proto/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

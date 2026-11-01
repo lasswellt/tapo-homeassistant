@@ -59,11 +59,12 @@ Home Assistant's core `tplink` integration controls the devices.
   (stuck in setup retry/error, or loaded with every entity unavailable), and onboards
   newly added devices.
 
-**Install.** Copy `custom_components/tapo_onboard` into your `custom_components/`
-directory, or add this repository as a HACS custom repository. The integration needs
-`tapolink-proto` (`packages/tapolink-proto/`) from PyPI, which is **not yet
-published**. Until it is, installation is development-only, via the uv workspace in
-this repository.
+**Install** (Home Assistant 2026.10 or later). In HACS, open the menu > Custom
+repositories, add `https://github.com/lasswellt/tapo-homeassistant` with type
+"Integration", install "Tapo Cloud Onboarding for TP-Link Smart Home", and restart
+Home Assistant. Without HACS, copy `custom_components/tapo_onboard` from the latest
+release into your `custom_components/` directory. Home Assistant installs the
+`tapolink-proto` library from PyPI on first load.
 
 **Setup.**
 
@@ -117,11 +118,13 @@ Contract drift against core is checked by `tools/check_core_tplink_contract.sh`.
 
 ## Status
 
-Phase 1a (`tapo_onboard` and `packages/tapolink-proto/`, a cloud-only library) is
-built (2026-11-01). Still pending: manual verification on a real Home Assistant
-instance with real devices. The full `tapolink` integration is still a design.
-There is **no public release before TPAP support**: without it, most current Tapo
-plugs would not connect.
+Phase 1a is released as v0.1.0: `tapo_onboard` and `tapolink-proto` (a cloud-only
+library). It was verified on Home Assistant 2026.10.4 with real devices on
+2026-11-01: 19 of 20 selected devices were onboarded without typing an IP, and the
+one failure was a bulb that was offline. Recovering a device that moved IP is covered
+by tests but has not been observed on hardware. The full `tapolink` integration is
+still a design, with **no public release before TPAP support**: without it, most
+current Tapo plugs would not connect.
 
 Before writing integration code, run the validation spike against your own account:
 

@@ -1,13 +1,33 @@
 [project]
 name = "tapolink-proto"
 version = "0.1.0"
-description = "Clean-room Tapo/TP-Link local protocol client"
+description = "Clean-room async TP-Link Tapo cloud inventory client and TDP identity probe"
+readme = "README.md"
 requires-python = ">=3.13"
 license = "Apache-2.0"
-dependencies = [
-    "aiohttp",
-    "cryptography",
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "tapolink contributors" }]
+keywords = ["tapo", "tp-link", "kasa", "home-assistant", "iot"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Home Automation",
+    "Typing :: Typed",
 ]
+dependencies = [
+    "aiohttp>=3.10",
+    "cryptography>=43",
+]
+
+[project.urls]
+Homepage = "https://github.com/lasswellt/tapo-homeassistant"
+Source = "https://github.com/lasswellt/tapo-homeassistant/tree/main/packages/tapolink-proto"
+Issues = "https://github.com/lasswellt/tapo-homeassistant/issues"
 
 [build-system]
 requires = ["hatchling"]

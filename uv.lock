@@ -4426,8 +4426,8 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aiohttp" },
-    { name = "cryptography" },
+    { name = "aiohttp", specifier = ">=3.10" },
+    { name = "cryptography", specifier = ">=43" },
 ]
 
 [[package]]
