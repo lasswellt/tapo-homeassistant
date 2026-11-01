@@ -77,7 +77,9 @@ async def async_onboard_device(
             result["flow_id"],
             {CONF_USERNAME: username, CONF_PASSWORD: password},
         )
-        if result["type"] == FlowResultType.FORM:
+        if result["type"] == FlowResultType.FORM and (
+            result["step_id"] == "user_auth_confirm"
+        ):
             flow.async_abort(result["flow_id"])
             async_request_host_update(hass, host=host, mac=mac)
             return OnboardOutcome.AUTH_FAILED

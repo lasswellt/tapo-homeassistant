@@ -30,12 +30,14 @@ class StubTplinkFlow(ConfigFlow, domain="tplink"):
 
     connect_result: str = "ok"  # ok | auth | cannot_connect | camera
     valid_password: str = "secret"
+    post_auth_camera: bool = False
     dhcp_infos: list[DhcpServiceInfo] = []
 
     @classmethod
     def reset(cls) -> None:
         cls.connect_result = "ok"
         cls.valid_password = "secret"
+        cls.post_auth_camera = False
         cls.dhcp_infos = []
 
     def _create(self, host: str) -> ConfigFlowResult:
@@ -69,6 +71,8 @@ class StubTplinkFlow(ConfigFlow, domain="tplink"):
             return self.async_show_form(
                 step_id="user_auth_confirm", errors={"password": "invalid_auth"}
             )
+        if type(self).post_auth_camera:
+            return self.async_show_form(step_id="camera_auth_confirm")
         return self._create(self._host)
 
     async def async_step_camera_auth_confirm(

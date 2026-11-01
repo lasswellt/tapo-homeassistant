@@ -116,3 +116,14 @@ async def test_entry_for_mac_either_format(
     assert onb.async_tplink_entry_for_mac(hass, "AA-BB-CC-DD-EE-FF") is entry
     assert onb.async_tplink_entry_for_mac(hass, "aabbccddeeff") is entry
     assert onb.async_tplink_entry_for_mac(hass, "11:22:33:44:55:66") is None
+
+
+async def test_camera_step_after_valid_auth_handed_to_user(
+    hass: HomeAssistant, onb: ModuleType, stub: type[StubTplinkFlow]
+) -> None:
+    stub.connect_result = "auth"
+    stub.post_auth_camera = True
+    assert await _onboard(onb, hass) is onb.OnboardOutcome.HANDED_TO_USER
+    await hass.async_block_till_done()
+    flows = hass.config_entries.flow.async_progress_by_handler("tplink")
+    assert [f["context"]["source"] for f in flows] == [SOURCE_DHCP]
