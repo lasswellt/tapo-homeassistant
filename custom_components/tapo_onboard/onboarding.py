@@ -58,8 +58,13 @@ async def async_verify_identity(
     """Probe `host` and compare its TDP identity with the cloud's claim.
 
     Must pass before any credential or stored credential hash reaches `host`.
+    A probe that fails unexpectedly counts as NO_REPLY: the host stays unverified.
     """
-    info = await async_probe(host, query=await async_get_tdp_query(hass))
+    try:
+        info = await async_probe(host, query=await async_get_tdp_query(hass))
+    except Exception as exc:  # noqa: BLE001 - one host must not stop the caller
+        LOGGER.debug("identity probe for %s failed: %s", mac, type(exc).__name__)
+        return IdentityResult.NO_REPLY
     if info is None:
         return IdentityResult.NO_REPLY
     if info.matches_cloud_device(device_id) and info.matches_mac(mac):
@@ -81,6 +86,22 @@ def async_request_host_update(hass: HomeAssistant, *, host: str, mac: str) -> No
             macaddress=mac.replace(":", "").replace("-", "").lower(),
         ),
     )
+
+
+async def async_hand_off_if_verified(
+    hass: HomeAssistant, *, host: str, mac: str, device_id: str
+) -> IdentityResult:
+    """Start core's DHCP flow for `host` only once it proves the identity.
+
+    Core's DHCP flow logs in with stored credentials, so nothing is started for
+    a MISMATCH or NO_REPLY host.
+    """
+    identity = await async_verify_identity(
+        hass, host=host, mac=mac, device_id=device_id
+    )
+    if identity is IdentityResult.VERIFIED:
+        async_request_host_update(hass, host=host, mac=mac)
+    return identity
 
 
 @callback

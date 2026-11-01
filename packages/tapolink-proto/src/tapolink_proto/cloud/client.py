@@ -222,12 +222,16 @@ class CloudClient:
                 token=session.token,
             )
             page = result.get("deviceList")
-            entries = [d for d in page if isinstance(d, dict)] if page else []
+            entries = page if isinstance(page, list) else []
             for entry in entries:
                 try:
+                    if not isinstance(entry, dict):
+                        raise CloudResponseError("device entry is not an object")
                     devices.append(CloudDevice.from_api(entry))
                 except CloudResponseError:
                     _LOGGER.debug("skipping malformed device entry")
+            # `index` is an item offset, not a page number (RESEARCH §11.7).
+            # Advance by every entry returned, malformed ones included.
             index += len(entries)
             total = result.get("totalNum")
             if not entries or not isinstance(total, int) or index >= total:

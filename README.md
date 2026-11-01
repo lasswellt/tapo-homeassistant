@@ -53,7 +53,8 @@ Home Assistant's core `tplink` integration controls the devices.
   their LAN IPs.
 - Drives core `tplink`'s add-device flow for the ones you pick, passing the IP and
   your credentials, so you never type an IP. The hand-off, and any "Discovered" card,
-  happen only after the device answers an identity probe.
+  happen only after the device at that IP answers a unicast probe with the device ID
+  and MAC address the cloud listed for it.
 - Every 30 minutes it re-reads the list. It repairs the IP of lost `tplink` entries
   (stuck in setup retry/error, or loaded with every entity unavailable), and onboards
   newly added devices.
@@ -90,17 +91,24 @@ it is held in memory during setup.
 entries and for new devices, at most once per device per 15 minutes. An entry is lost
 when it is in setup retry/error, or when it is loaded and every enabled entity is
 unavailable (the device moved or is off). If the cloud reports a different IP and the
-device there answers the identity probe, it requests a host update through core's DHCP
-flow; core rewrites the host and reloads the entry.
+device there answers with a matching identity, it requests a host update through
+core's DHCP flow; core rewrites the host and reloads the entry. Each failed lookup for
+the same device (no IP in the cloud, same IP as before, or no matching answer) doubles
+the gap before the next one: 15, 30, 60, then at most 120 minutes. The gap resets once
+the entry works again. The first poll after setup reuses the device list the setup
+dialog just fetched.
 
 **Limitations.**
 
 - After a Home Assistant restart the password is gone from memory. New devices then
-  get a "Discovered" card, only if they pass the identity probe, and you re-enter
-  credentials there.
-- A device that does not answer the identity probe (for example UDP 20002 blocked
-  between Home Assistant and the IoT network) is not onboarded and is retried every
-  30 minutes.
+  get a "Discovered" card, only if they answer with a matching identity, and you
+  re-enter credentials there.
+- A device that does not answer the probe (for example UDP 20002 blocked between Home
+  Assistant and the IoT network) is not onboarded. It is retried with the backoff
+  above.
+- A device that answers with a **different** identity (another device now holds that
+  IP) gets no card and is not retried until Home Assistant restarts or the
+  integration is reloaded.
 - Core `tplink`'s own login issues still apply (for example plugs on firmware 1.4.x
   needing TPAP, which core does not provide).
 - Matches are only as good as the cloud's IP data; it does not control devices.
@@ -201,8 +209,11 @@ failures, so pick one per device.
   device-list check per 30 minutes. TP-Link rate-limits and locks accounts that
   exceed this. If the cloud is unreachable or your sign-in expires, **your devices
   keep working**; only finding new devices pauses.
-- **Before any credentials are sent**, each device's identity is checked against
-  your account's device list.
+- **Before any credentials are sent**, the device at the cloud's IP must answer a
+  unicast probe with the device ID and MAC address your account lists for it, and
+  the reply must echo the probe's random serial. The probe is unauthenticated UDP: it
+  stops credentials going to a stale or reused IP, not to an attacker on your LAN who
+  can see the probe.
 - **Your Tapo account's list of signed-in devices** shows this integration under the
   name "Home Assistant". The login accepts that name (verified 2026-11-01). Otherwise
   it talks to the TP-Link cloud the way the Tapo iOS app does, so other fields may

@@ -622,8 +622,13 @@ async def test_onboard_exception_isolated(
     assert len(hass.config_entries.async_entries("tplink")) == 1
 
 
-def _count_logins(stub: type[StubTplinkFlow]) -> list[str]:
-    """Record each credential submission reaching the stub core flow."""
+def _count_logins(
+    stub: type[StubTplinkFlow], monkeypatch: pytest.MonkeyPatch
+) -> list[str]:
+    """Record the host of each credential submission reaching the stub flow.
+
+    Installed with monkeypatch so the shared stub class is restored afterwards.
+    """
     submitted: list[str] = []
     original = stub.async_step_user_auth_confirm
 
@@ -634,7 +639,7 @@ def _count_logins(stub: type[StubTplinkFlow]) -> list[str]:
             submitted.append(self._host)
         return await original(self, user_input)
 
-    stub.async_step_user_auth_confirm = _spy  # type: ignore[method-assign]
+    monkeypatch.setattr(stub, "async_step_user_auth_confirm", _spy)
     return submitted
 
 
@@ -643,11 +648,12 @@ async def test_terminal_outcomes_not_retried_after_floor(
     mod: ModuleType,
     stub: type[StubTplinkFlow],
     freezer: FrozenDateTimeFactory,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Terminal outcomes stay attempted after the 15-min details floor lapses."""
     stub.connect_result = "auth"
     stub.valid_password = "other"
-    logins = _count_logins(stub)
+    logins = _count_logins(stub, monkeypatch)
 
     # Part 1: password path, AUTH_FAILED on refresh 1 is never retried.
     client = FakeCloudClient([_device(STUB_MAC)], {STUB_MAC: "10.0.0.5"})
@@ -655,7 +661,7 @@ async def test_terminal_outcomes_not_retried_after_floor(
     await coord.async_refresh()
     assert coord.data.outcomes[STUB_MAC].value == "auth_failed"
     assert client.details_calls == [STUB_MAC]
-    assert len(logins) == 1
+    assert logins == ["10.0.0.5"]
     freezer.tick(timedelta(minutes=31))
     await coord.async_refresh()
     assert client.details_calls == [STUB_MAC]
@@ -689,4 +695,123 @@ async def test_terminal_outcomes_not_retried_after_floor(
     assert client2.details_calls == [MAC2]
     assert MAC2 in coord2.data.outcomes  # retried: an outcome was produced
     assert STUB_MAC not in coord2.data.outcomes
-    assert STUB_MAC not in logins
+    assert "10.0.0.5" not in logins  # STUB_MAC's host: never logged in again
+
+
+async def _cycles(
+    coord: InventoryCoordinator,
+    client: FakeCloudClient,
+    freezer: FrozenDateTimeFactory,
+    count: int,
+) -> list[int]:
+    """Run `count` 31-minute cycles; return the cycles that called details."""
+    called: list[int] = []
+    for cycle in range(count):
+        before = len(client.details_calls)
+        await coord._async_update_data()
+        if len(client.details_calls) > before:
+            called.append(cycle)
+        freezer.tick(timedelta(minutes=31))
+    return called
+
+
+async def test_unreachable_new_device_backs_off(
+    hass: HomeAssistant,
+    mod: ModuleType,
+    stub: type[StubTplinkFlow],
+    freezer: FrozenDateTimeFactory,
+) -> None:
+    """Gaps after failures: 15, 30, 60, 120 min, then capped at 120 min."""
+    client = FakeCloudClient([_device(STUB_MAC)], {STUB_MAC: "10.0.0.5"})
+    coord = _coord(mod, hass, _entry(hass), client)
+    with _probe_returns(None):
+        called = await _cycles(coord, client, freezer, 13)
+    # Calls at t=0, 31, 62, 124, 248, 372 min (cycle = t / 31).
+    assert called == [0, 1, 2, 4, 8, 12]
+    assert stub.dhcp_infos == []
+
+
+async def test_offline_device_without_ip_backs_off(
+    hass: HomeAssistant,
+    mod: ModuleType,
+    stub: type[StubTplinkFlow],
+    freezer: FrozenDateTimeFactory,
+) -> None:
+    client = FakeCloudClient([_device(STUB_MAC)], {STUB_MAC: None})
+    coord = _coord(mod, hass, _entry(hass), client)
+    assert await _cycles(coord, client, freezer, 5) == [0, 1, 2, 4]
+
+
+async def test_lost_entry_backoff_resets_when_entry_recovers(
+    hass: HomeAssistant,
+    mod: ModuleType,
+    stub: type[StubTplinkFlow],
+    freezer: FrozenDateTimeFactory,
+) -> None:
+    """A lost entry still at the cloud's address backs off; recovery resets it."""
+    tp = _tplink(hass, ConfigEntryState.LOADED, host="10.0.0.9")
+    _entity(hass, tp, "a", STATE_UNAVAILABLE)
+    client = FakeCloudClient([_device(STUB_MAC)], {STUB_MAC: "10.0.0.9"})
+    coord = _coord(mod, hass, _entry(hass), client)
+    assert await _cycles(coord, client, freezer, 3) == [0, 1, 2]
+    entity_id = er.async_get(hass).async_get_entity_id("switch", "tplink", "a")
+    assert entity_id is not None
+    hass.states.async_set(entity_id, STATE_ON)  # recovered at cycle 3
+    await coord._async_update_data()
+    freezer.tick(timedelta(minutes=31))
+    hass.states.async_set(entity_id, STATE_UNAVAILABLE)  # lost again
+    # Without the reset, the 4th failure at cycle 4 would wait 120 min.
+    assert await _cycles(coord, client, freezer, 2) == [0, 1]
+    assert client.details_calls == [STUB_MAC] * 5
+
+
+async def test_lost_entry_probe_error_does_not_fail_cycle(
+    hass: HomeAssistant, mod: ModuleType, stub: type[StubTplinkFlow]
+) -> None:
+    tp = _tplink(hass, ConfigEntryState.SETUP_RETRY)
+    client = FakeCloudClient([_device(STUB_MAC)], {STUB_MAC: "10.0.0.9"})
+
+    async def _boom(host: str, *, query: bytes, **_: object) -> TdpInfo | None:
+        raise RuntimeError("socket exploded")
+
+    coord = _coord(mod, hass, _entry(hass), client)
+    with patch("custom_components.tapo_onboard.onboarding.async_probe", _boom):
+        await coord.async_refresh()
+    await hass.async_block_till_done()
+    assert coord.last_update_success
+    assert coord.data.host_updates == ()
+    assert stub.dhcp_infos == []
+    assert tp.data["host"] == "10.0.0.1"
+
+
+@pytest.mark.parametrize(
+    ("age", "lists"), [(timedelta(minutes=2), 0), (timedelta(minutes=31), 1)]
+)
+async def test_first_cycle_reuses_fresh_flow_list(
+    hass: HomeAssistant,
+    mod: ModuleType,
+    stub: type[StubTplinkFlow],
+    age: timedelta,
+    lists: int,
+) -> None:
+    client = FakeCloudClient([_device(STUB_MAC)], {STUB_MAC: "10.0.0.5"})
+    flow_result = mod.FlowResult(
+        outcomes={STUB_MAC: mod.OnboardOutcome.ADDED},
+        devices=(_device(STUB_MAC), _device(MAC2)),
+        listed_at=dt_util.utcnow() - age,
+    )
+    coord = mod.InventoryCoordinator(
+        hass,
+        _entry(hass),
+        client,
+        password=lambda: None,
+        username="u@example.com",
+        flow_result=flow_result,
+    )
+    await coord.async_refresh()
+    assert coord.last_update_success
+    assert client.list_calls == lists
+    expected = {STUB_MAC, MAC2} if lists == 0 else {STUB_MAC}
+    assert set(coord.data.devices) == expected
+    await coord.async_refresh()
+    assert client.list_calls == lists + 1

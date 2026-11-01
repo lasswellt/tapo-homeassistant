@@ -92,6 +92,7 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
         self._ignored: list[str] = []
         self._outcomes: dict[str, OnboardOutcome] = {}
         self._details_at: dict[str, datetime] = {}
+        self._listed_at: datetime | None = None
         self._task: asyncio.Task[None] | None = None
         self._reauth = False
 
@@ -202,6 +203,7 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
         assert self._client is not None and self._session is not None  # noqa: S101
         try:
             self._devices = await self._client.list_devices(self._session)
+            self._listed_at = dt_util.utcnow()
         except Exception as err:  # noqa: BLE001 - mapped to a form error
             key, ph = self._error(err)
             return self._user_form({"base": key}, ph)
@@ -367,7 +369,10 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
             unique_id
         ] = self._password
         self.hass.data[DOMAIN].setdefault(DATA_FLOW_RESULT, {})[unique_id] = FlowResult(
-            outcomes=dict(self._outcomes), details_at=dict(self._details_at)
+            outcomes=dict(self._outcomes),
+            details_at=dict(self._details_at),
+            devices=tuple(self._devices),
+            listed_at=self._listed_at,
         )
         outcomes = list(self._outcomes.values())
         added = outcomes.count(OnboardOutcome.ADDED)

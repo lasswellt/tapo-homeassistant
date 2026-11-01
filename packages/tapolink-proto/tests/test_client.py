@@ -151,6 +151,35 @@ async def test_list_devices_paginates(
     assert [json.loads(c.kwargs["data"])["index"] for c in calls] == [0, 30]
 
 
+async def test_list_devices_advances_by_entries_returned(
+    mocked: aioresponses, client: CloudClient
+) -> None:
+    """`index` is an item offset (RESEARCH §11.7): a short page or a
+    malformed entry still moves the offset by everything returned."""
+    path = "api/v2/common/getDeviceListByPage"
+    mocked.post(
+        url(path),
+        payload={
+            "error_code": 0,
+            "result": {
+                "deviceList": [device(i) for i in range(24)] + ["junk"],
+                "totalNum": 27,
+            },
+        },
+    )
+    mocked.post(
+        url(path),
+        payload={
+            "error_code": 0,
+            "result": {"deviceList": [device(25), device(26)], "totalNum": 27},
+        },
+    )
+    devices = await client.list_devices(SESSION)
+    assert len(devices) == 26
+    calls = next(iter(mocked.requests.values()))
+    assert [json.loads(c.kwargs["data"])["index"] for c in calls] == [0, 25]
+
+
 async def test_rate_limited(mocked: aioresponses, client: CloudClient) -> None:
     mocked.post(
         url("api/v2/common/getDeviceListByPage"),

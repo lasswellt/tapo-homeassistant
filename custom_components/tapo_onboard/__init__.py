@@ -45,37 +45,44 @@ def _flow_results(hass: HomeAssistant) -> dict[str, FlowResult]:
 
 async def async_setup_entry(hass: HomeAssistant, entry: TapoOnboardConfigEntry) -> bool:
     """Set up the entry; the cloud is off the critical path."""
-    ssl_ctx = await hass.async_add_executor_job(build_cloud_ssl_context)
-    client = CloudClient(
-        async_get_clientsession(hass),
-        ssl_context=ssl_ctx,
-        terminal_uuid=entry.data[CONF_TERMINAL_UUID],
-    )
     handoff = _handoff(hass)
     flow_results = _flow_results(hass)
-    runtime: TapoOnboardRuntimeData
-
-    def password() -> str | None:
-        fresh = handoff.pop(entry.unique_id or "", None)
-        if fresh is not None:
-            runtime.password = fresh
-        return runtime.password
-
-    coordinator = InventoryCoordinator(
-        hass,
-        entry,
-        client,
-        password=password,
-        username=entry.data[CONF_USERNAME],
-        flow_result=flow_results.pop(entry.unique_id or "", None),
-    )
-    runtime = TapoOnboardRuntimeData(client, coordinator)
-    entry.runtime_data = runtime
 
     def _drop_handoff() -> None:
         handoff.pop(entry.unique_id or "", None)
         flow_results.pop(entry.unique_id or "", None)
 
+    try:
+        ssl_ctx = await hass.async_add_executor_job(build_cloud_ssl_context)
+        client = CloudClient(
+            async_get_clientsession(hass),
+            ssl_context=ssl_ctx,
+            terminal_uuid=entry.data[CONF_TERMINAL_UUID],
+        )
+        runtime: TapoOnboardRuntimeData
+
+        def password() -> str | None:
+            fresh = handoff.pop(entry.unique_id or "", None)
+            if fresh is not None:
+                runtime.password = fresh
+            return runtime.password
+
+        coordinator = InventoryCoordinator(
+            hass,
+            entry,
+            client,
+            password=password,
+            username=entry.data[CONF_USERNAME],
+            flow_result=flow_results.pop(entry.unique_id or "", None),
+        )
+    except BaseException:
+        # Unload never runs for a failed setup, so the hand-off must not
+        # outlive it in hass.data (rule 4: the password lives in memory only
+        # for as long as an entry uses it).
+        _drop_handoff()
+        raise
+    runtime = TapoOnboardRuntimeData(client, coordinator)
+    entry.runtime_data = runtime
     entry.async_on_unload(_drop_handoff)
 
     # This integration has no entities, and `update_coordinator` only

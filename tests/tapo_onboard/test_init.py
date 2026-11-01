@@ -238,6 +238,7 @@ class FlowCloudClient:
     """Two-device cloud fake that records every device_details call."""
 
     details_calls: list[str] = []
+    list_calls = 0
 
     def __init__(self, *args: object, **kwargs: object) -> None:
         pass
@@ -246,6 +247,7 @@ class FlowCloudClient:
         return CloudSession("tok", "ref", 42)
 
     async def list_devices(self, session: CloudSession) -> list[CloudDevice]:
+        type(self).list_calls += 1
         return [
             CloudDevice(
                 device_id=DEVICE_ID,
@@ -273,6 +275,7 @@ class FlowCloudClient:
 def flow_env(hass: HomeAssistant) -> Iterator[list[str]]:
     """Patch cloud client + probe for flow-then-setup; yields probed hosts."""
     FlowCloudClient.details_calls = []
+    FlowCloudClient.list_calls = 0
     probed: list[str] = []
     host_macs = {host: mac for mac, host in FLOW_HOSTS.items()}
 
@@ -345,3 +348,28 @@ async def test_cannot_connect_device_retried_after_floor(
     async_fire_time_changed(hass)
     await hass.async_block_till_done()
     assert sorted(FlowCloudClient.details_calls) == sorted([*FLOW_HOSTS, *FLOW_HOSTS])
+
+
+async def test_setup_lists_once_across_flow_and_first_cycle(
+    hass: HomeAssistant, flow_env: list[str], freezer: FrozenDateTimeFactory
+) -> None:
+    """The flow's device list serves the setup refresh (rule 3: one per 30 min)."""
+    StubTplinkFlow.connect_result = "cannot_connect"
+    await _run_flow(hass)
+    assert FlowCloudClient.list_calls == 1
+    freezer.tick(timedelta(minutes=31))
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+    assert FlowCloudClient.list_calls == 2
+
+
+async def test_failed_setup_drops_password_handoff(hass: HomeAssistant) -> None:
+    entry = _entry(hass)
+
+    def _broken() -> ssl.SSLContext:
+        raise ssl.SSLError("anchor missing")
+
+    with patch("custom_components.tapo_onboard.build_cloud_ssl_context", _broken):
+        await hass.config_entries.async_setup(entry.entry_id)
+    assert entry.state is ConfigEntryState.SETUP_ERROR
+    assert EMAIL not in hass.data[DOMAIN][DATA_PENDING_PASSWORD]

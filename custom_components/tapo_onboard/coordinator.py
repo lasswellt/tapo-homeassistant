@@ -4,17 +4,19 @@
 """Cloud inventory coordinator.
 
 Fixed cadence: `timedelta(minutes=30)` (`INVENTORY_INTERVAL`), one
-`list_devices` call per cycle. `device_details` is only called for lost `tplink`
-entries (failed to set up, or loaded with every enabled entity unavailable) and
-for devices not yet seen, and at most once per device per 15 minutes
-(`DETAILS_FLOOR`).
+`list_devices` call per cycle; the first cycle after the config flow reuses the
+flow's list instead. `device_details` is only called for lost `tplink` entries
+(failed to set up, or loaded with every enabled entity unavailable) and for
+devices not yet seen, and at most once per device per 15 minutes
+(`DETAILS_FLOOR`). Each failed lookup for the same device doubles that gap, up
+to `DETAILS_BACKOFF_MAX`.
 """
 
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.const import STATE_UNAVAILABLE
@@ -39,6 +41,7 @@ from .const import (
     CONF_IGNORED_MACS,
     CONF_REFRESH_TOKEN,
     CONF_TOKEN,
+    DETAILS_BACKOFF_MAX,
     DETAILS_FLOOR,
     DOMAIN,
     INVENTORY_INTERVAL,
@@ -48,10 +51,9 @@ from .const import (
 from .onboarding import (
     IdentityResult,
     OnboardOutcome,
+    async_hand_off_if_verified,
     async_onboard_device,
-    async_request_host_update,
     async_tplink_entry_for_mac,
-    async_verify_identity,
 )
 
 _BROKEN_STATES = frozenset({ConfigEntryState.SETUP_RETRY, ConfigEntryState.SETUP_ERROR})
@@ -72,6 +74,9 @@ class FlowResult:
 
     outcomes: dict[str, OnboardOutcome] = field(default_factory=dict)
     details_at: dict[str, datetime] = field(default_factory=dict)
+    # The flow's device list, reused by the first cycle instead of listing again.
+    devices: tuple[CloudDevice, ...] = ()
+    listed_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +115,9 @@ class InventoryCoordinator(DataUpdateCoordinator[InventoryState]):
         self._username = username
         self._attempted: set[str] = set()
         self._details_not_before: dict[str, datetime] = {}
+        self._details_called: dict[str, datetime] = {}
+        self._failures: dict[str, int] = {}
+        self._seed: dict[str, CloudDevice] | None = None
         if flow_result is not None:
             self._attempted.update(
                 mac for mac, o in flow_result.outcomes.items() if o in _TERMINAL
@@ -117,6 +125,11 @@ class InventoryCoordinator(DataUpdateCoordinator[InventoryState]):
             self._details_not_before.update(
                 (mac, at + DETAILS_FLOOR) for mac, at in flow_result.details_at.items()
             )
+            listed_at = flow_result.listed_at
+            if listed_at is not None and (
+                dt_util.utcnow() - listed_at < INVENTORY_INTERVAL
+            ):
+                self._seed = {d.mac: d for d in flow_result.devices}
         self._reauth_started = False
         self._session = self._session_from_entry()
 
@@ -185,16 +198,32 @@ class InventoryCoordinator(DataUpdateCoordinator[InventoryState]):
                 return False
         return True
 
-    async def _details(self, device: CloudDevice) -> DeviceDetails | None:
-        """Fetch details; a per-device failure skips only that device.
+    def _details_due(self, mac: str) -> bool:
+        """True once the floor (or backoff) since this device's last call passed.
 
-        Skipped (None) until `DETAILS_FLOOR` after this device's previous call,
-        whether the flow or this coordinator made it (rule 3).
+        The floor applies whether the flow or this coordinator made the call
+        (rule 3).
+        """
+        not_before = self._details_not_before.get(mac)
+        return not_before is None or dt_util.utcnow() >= not_before
+
+    def _settle(self, mac: str, *, progressed: bool) -> None:
+        """Reset the backoff after progress, else double the gap (capped)."""
+        if progressed:
+            self._failures.pop(mac, None)
+            return
+        failures = self._failures.get(mac, 0) + 1
+        self._failures[mac] = failures
+        delay: timedelta = min(DETAILS_FLOOR * 2 ** (failures - 1), DETAILS_BACKOFF_MAX)
+        self._details_not_before[mac] = self._details_called[mac] + delay
+
+    async def _details(self, device: CloudDevice) -> DeviceDetails | None:
+        """Fetch details (caller checked `_details_due`).
+
+        A per-device failure returns None and skips only that device.
         """
         now = dt_util.utcnow()
-        not_before = self._details_not_before.get(device.mac)
-        if not_before is not None and now < not_before:
-            return None
+        self._details_called[device.mac] = now
         self._details_not_before[device.mac] = now + DETAILS_FLOOR
         try:
             return await self._call(lambda s: self._client.device_details(s, device))
@@ -208,6 +237,10 @@ class InventoryCoordinator(DataUpdateCoordinator[InventoryState]):
         # Tokens may have been rewritten by the reauth flow since last cycle.
         self._session = self._session_from_entry()
         try:
+            if (seeded := self._seed) is not None:
+                # The config flow listed seconds ago: no second call (rule 3).
+                self._seed = None
+                return await self._process(seeded)
             listed = await self._call(self._client.list_devices)
             self._reauth_started = False
             return await self._process({d.mac: d for d in listed})
@@ -233,18 +266,21 @@ class InventoryCoordinator(DataUpdateCoordinator[InventoryState]):
                 # Case (a): IP repair for lost entries. Core rewrites the host
                 # and reloads for both loaded and setup-retry/error entries.
                 if not self._is_lost(tplink_entry):
+                    self._failures.pop(mac, None)
+                    continue
+                if not self._details_due(mac):
                     continue
                 details = await self._details(device)
-                if details is None or not details.ip:
+                ip = details.ip if details is not None else None
+                if not ip or ip == tplink_entry.data.get("host"):
+                    # Offline in the cloud, or still at the same address.
+                    self._settle(mac, progressed=False)
                     continue
-                if details.ip != tplink_entry.data.get("host"):
-                    # Core logs in with stored credentials: identity first.
-                    verified = await async_verify_identity(
-                        self.hass, host=details.ip, mac=mac, device_id=device.device_id
-                    )
-                    if verified is not IdentityResult.VERIFIED:
-                        continue
-                    async_request_host_update(self.hass, host=details.ip, mac=mac)
+                identity = await async_hand_off_if_verified(
+                    self.hass, host=ip, mac=mac, device_id=device.device_id
+                )
+                self._settle(mac, progressed=identity is IdentityResult.VERIFIED)
+                if identity is IdentityResult.VERIFIED:
                     host_updates.append(mac)
                 continue
 
@@ -255,11 +291,12 @@ class InventoryCoordinator(DataUpdateCoordinator[InventoryState]):
                 or device.model_base in UNSUPPORTED_IN_CORE_MODELS
             ):
                 continue
-            details = await self._details(device)
-            if details is None:
+            if not self._details_due(mac):
                 continue
-            if not details.ip:
+            details = await self._details(device)
+            if details is None or not details.ip:
                 LOGGER.debug("no IP for new device %s, skipping", mac)
+                self._settle(mac, progressed=False)
                 continue
             password = self._password()
             if password:
@@ -277,20 +314,22 @@ class InventoryCoordinator(DataUpdateCoordinator[InventoryState]):
                     outcomes[mac] = OnboardOutcome.CANNOT_CONNECT
                 if outcomes[mac] in _TERMINAL:
                     self._attempted.add(mac)
+                self._settle(mac, progressed=outcomes[mac] in _TERMINAL)
             else:
-                identity = await async_verify_identity(
+                identity = await async_hand_off_if_verified(
                     self.hass, host=details.ip, mac=mac, device_id=device.device_id
                 )
-                if identity is IdentityResult.MISMATCH:
-                    outcomes[mac] = OnboardOutcome.IDENTITY_MISMATCH
-                    self._attempted.add(mac)
-                    continue
                 if identity is IdentityResult.NO_REPLY:
-                    # Unverified host: no hand-off, retry next cycle.
+                    # Unverified host: no hand-off, retried with backoff.
+                    self._settle(mac, progressed=False)
                     continue
-                async_request_host_update(self.hass, host=details.ip, mac=mac)
-                outcomes[mac] = OnboardOutcome.HANDED_TO_USER
+                outcomes[mac] = (
+                    OnboardOutcome.HANDED_TO_USER
+                    if identity is IdentityResult.VERIFIED
+                    else OnboardOutcome.IDENTITY_MISMATCH
+                )
                 self._attempted.add(mac)
+                self._settle(mac, progressed=True)
 
         return InventoryState(
             devices=devices, outcomes=outcomes, host_updates=tuple(host_updates)

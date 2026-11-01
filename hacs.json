@@ -1,6 +1,6 @@
 {
-  "name": "Tapo (Cloud-Assisted Discovery)",
-  "homeassistant": "2026.11.0",
+  "name": "Tapo Cloud Onboarding for TP-Link Smart Home",
+  "homeassistant": "2026.10.0",
   "render_readme": true,
   "zip_release": false
 }

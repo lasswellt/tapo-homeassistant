@@ -34,9 +34,16 @@ RESULT: dict[str, Any] = {
 }
 
 
+def _echo(reply: bytes, request: bytes) -> bytes:
+    """Stamp the request's serial into a reply header, as devices do (§11.8)."""
+    return reply[:8] + request[8:12] + reply[12:] if len(reply) >= 16 else reply
+
+
 class _Responder(asyncio.DatagramProtocol):
-    def __init__(self, reply: bytes | None) -> None:
+    def __init__(self, reply: bytes | None, *, echo: bool = True) -> None:
         self.reply = reply
+        self.echo = echo
+        self.requests: list[bytes] = []
         self.transport: asyncio.DatagramTransport | None = None
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
@@ -44,16 +51,27 @@ class _Responder(asyncio.DatagramProtocol):
         self.transport = transport
 
     def datagram_received(self, data: bytes, addr: Any) -> None:
+        self.requests.append(data)
         if self.reply is not None and self.transport is not None:
-            self.transport.sendto(self.reply, addr)
+            reply = _echo(self.reply, data) if self.echo else self.reply
+            self.transport.sendto(reply, addr)
 
 
-async def _serve(reply: bytes | None) -> tuple[asyncio.BaseTransport, int]:
+async def _serve(
+    reply: bytes | None, *, echo: bool = True
+) -> tuple[asyncio.BaseTransport, int]:
+    transport, port, _ = await _serve_with(reply, echo=echo)
+    return transport, port
+
+
+async def _serve_with(
+    reply: bytes | None, *, echo: bool = True
+) -> tuple[asyncio.BaseTransport, int, _Responder]:
     loop = asyncio.get_running_loop()
-    transport, _ = await loop.create_datagram_endpoint(
-        lambda: _Responder(reply), local_addr=("127.0.0.1", 0)
+    transport, protocol = await loop.create_datagram_endpoint(
+        lambda: _Responder(reply, echo=echo), local_addr=("127.0.0.1", 0)
     )
-    return transport, int(transport.get_extra_info("sockname")[1])
+    return transport, int(transport.get_extra_info("sockname")[1]), protocol
 
 
 def _frame(body: bytes) -> bytes:
@@ -141,7 +159,7 @@ async def _serve_many(replies: list[bytes]) -> tuple[asyncio.BaseTransport, int]
         def datagram_received(self, data: bytes, addr: Any) -> None:
             assert self.transport is not None
             for reply in replies:
-                self.transport.sendto(reply, addr)
+                self.transport.sendto(_echo(reply, data), addr)
 
     loop = asyncio.get_running_loop()
     transport, _ = await loop.create_datagram_endpoint(
@@ -182,3 +200,30 @@ async def test_oversize_reply_returns_none(query: bytes) -> None:
         )
     finally:
         transport.close()
+
+
+async def test_reply_with_other_serial_ignored(query: bytes) -> None:
+    """A well-formed reply that does not echo this probe's serial is dropped."""
+    reply = _frame(json.dumps({"error_code": 0, "result": RESULT}).encode())
+    transport, port = await _serve(reply, echo=False)
+    try:
+        info = await async_probe("127.0.0.1", query=query, port=port, timeout=0.8)
+    finally:
+        transport.close()
+    assert info is None
+
+
+async def test_each_probe_has_fresh_serial_and_valid_crc(query: bytes) -> None:
+    reply = _frame(json.dumps({"error_code": 0, "result": RESULT}).encode())
+    transport, port, responder = await _serve_with(reply)
+    try:
+        for _ in range(2):
+            assert await async_probe("127.0.0.1", query=query, port=port, timeout=1.0)
+    finally:
+        transport.close()
+    first, second = responder.requests[0], responder.requests[-1]
+    assert first[8:12] != second[8:12]
+    for packet in (first, second):
+        assert packet[16:] == query[16:]
+        zeroed = packet[:12] + struct.pack(">I", 0x5A6B7C8D) + packet[16:]
+        assert binascii.crc32(zeroed) == struct.unpack(">I", packet[12:16])[0]

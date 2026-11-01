@@ -14,6 +14,9 @@ TPLINK_DOMAIN: Final = "tplink"
 INVENTORY_INTERVAL: Final = timedelta(minutes=30)
 # Minimum gap between two device_details calls for one device (rule 3).
 DETAILS_FLOOR: Final = timedelta(minutes=15)
+# Repeated failed lookups for one device double the gap from DETAILS_FLOOR up to
+# this cap (a device that is off should not cost a cloud call every cycle).
+DETAILS_BACKOFF_MAX: Final = timedelta(hours=2)
 
 CONF_TERMINAL_UUID: Final = "terminal_uuid"
 CONF_TOKEN: Final = "token"

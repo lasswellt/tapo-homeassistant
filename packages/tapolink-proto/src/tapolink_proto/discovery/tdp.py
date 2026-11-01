@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Provenance: original, ported from tools/spike_cloud_discovery.py
-# (docs/RESEARCH.md §2, §11.3)
+# (docs/RESEARCH.md §2, §11.3, §11.8)
 """TDP (UDP 20002) unicast identity probe. Unicast only, never broadcast."""
 
 from __future__ import annotations
@@ -20,6 +20,9 @@ TDP_PORT: Final = 20002
 TDP_HEADER_SIZE: Final = 16
 _RESEND_INTERVAL: Final = 0.5
 _MAX_REPLY_SIZE: Final = 8192
+_SERIAL: Final = slice(8, 12)
+_CRC: Final = slice(12, 16)
+_CRC_PLACEHOLDER: Final = (0x5A6B7C8D).to_bytes(4, "big")
 _HEX12 = re.compile(r"[0-9a-f]{12}")
 
 
@@ -61,6 +64,15 @@ def build_query() -> bytes:
     query = bytearray(header + payload)
     query[12:16] = binascii.crc32(query).to_bytes(4, "big")
     return bytes(query)
+
+
+def _with_serial(query: bytes, serial: bytes) -> bytes:
+    """Return ``query`` with a new ``device_serial`` and a recomputed CRC."""
+    packet = bytearray(query)
+    packet[_SERIAL] = serial
+    packet[_CRC] = _CRC_PLACEHOLDER
+    packet[_CRC] = binascii.crc32(packet).to_bytes(4, "big")
+    return bytes(packet)
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,12 +142,17 @@ def _is_int(value: object) -> bool:
 
 
 class _Protocol(asyncio.DatagramProtocol):
-    def __init__(self, future: asyncio.Future[TdpInfo]) -> None:
+    def __init__(self, future: asyncio.Future[TdpInfo], serial: bytes) -> None:
         self._future = future
+        self._serial = serial
 
     def datagram_received(self, data: bytes, addr: tuple[str | Any, ...]) -> None:
-        """Complete the future only with a reply that parses to TdpInfo."""
-        if self._future.done():
+        """Complete the future only with a reply to this probe that parses.
+
+        Devices echo the request's ``device_serial`` (RESEARCH §11.8); a reply
+        carrying any other serial is stale or spoofed and is ignored.
+        """
+        if self._future.done() or data[_SERIAL] != self._serial:
             return
         info = _parse(data)
         if info is not None:
@@ -170,20 +187,24 @@ async def async_probe(
     """Unicast a TDP probe to ``host``, resending every ~0.5 s until timeout.
 
     The socket is connected to ``host:port`` so the kernel drops datagrams from
-    any other source. Returns None on timeout, or OSError; junk datagrams are ignored.
+    any other source, and each call stamps ``query`` with a fresh random serial
+    that the reply must echo. Returns None on timeout, or OSError; junk
+    datagrams and replies with another serial are ignored.
     """
     loop = asyncio.get_running_loop()
     future: asyncio.Future[TdpInfo] = loop.create_future()
+    serial = os.urandom(4)
+    packet = _with_serial(query, serial)
     try:
         transport, _ = await loop.create_datagram_endpoint(
-            lambda: _Protocol(future), remote_addr=(host, port)
+            lambda: _Protocol(future, serial), remote_addr=(host, port)
         )
     except OSError:
         return None
     try:
         deadline = loop.time() + timeout
         while (remaining := deadline - loop.time()) > 0:
-            transport.sendto(query)
+            transport.sendto(packet)
             try:
                 return await asyncio.wait_for(
                     asyncio.shield(future), min(_RESEND_INTERVAL, remaining)
