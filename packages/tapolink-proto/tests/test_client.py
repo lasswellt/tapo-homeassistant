@@ -23,6 +23,7 @@ from tapolink_proto.cloud import (
     MfaRequired,
     RefreshTokenUnusable,
 )
+from tapolink_proto.cloud.client import MAX_PAGES, PAGE_LIMIT
 
 GW = "https://n-wap-gw.tplinkcloud.com"
 
@@ -178,6 +179,29 @@ async def test_list_devices_advances_by_entries_returned(
     assert len(devices) == 26
     calls = next(iter(mocked.requests.values()))
     assert [json.loads(c.kwargs["data"])["index"] for c in calls] == [0, 25]
+
+
+async def test_list_devices_stops_at_page_cap(
+    mocked: aioresponses, client: CloudClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A cloud that never reaches its reported total cannot page forever."""
+    path = "api/v2/common/getDeviceListByPage"
+    mocked.post(
+        url(path),
+        payload={
+            "error_code": 0,
+            "result": {
+                "deviceList": [device(i) for i in range(PAGE_LIMIT)],
+                "totalNum": 10**9,
+            },
+        },
+        repeat=True,
+    )
+    devices = await client.list_devices(SESSION)
+    calls = next(iter(mocked.requests.values()))
+    assert len(calls) == MAX_PAGES
+    assert len(devices) == MAX_PAGES * PAGE_LIMIT
+    assert "still incomplete after 100 pages" in caplog.text
 
 
 async def test_rate_limited(mocked: aioresponses, client: CloudClient) -> None:

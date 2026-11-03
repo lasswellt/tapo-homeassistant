@@ -36,6 +36,10 @@ _LOGGER = logging.getLogger(__name__)
 GLOBAL_GATEWAY = "https://n-wap-gw.tplinkcloud.com"
 DEFAULT_REGION_CODE = "use1"
 PAGE_LIMIT = 30
+# Upper bound on device-list requests per call (3000 devices). A cloud that
+# keeps reporting a larger totalNum must not page forever against the rate
+# limit (CLAUDE.md rule 3).
+MAX_PAGES = 100
 DETAILS_URL = (
     "https://{region}-app-server.iot.i.tplinknbu.com/v1/things/{device_id}/details"
 )
@@ -215,7 +219,7 @@ class CloudClient:
         """Fetch every page of the account's device list."""
         devices: list[CloudDevice] = []
         index = 0
-        while True:
+        for _ in range(MAX_PAGES):
             result = await self._post(
                 "api/v2/common/getDeviceListByPage",
                 {"index": index, "limit": PAGE_LIMIT, "deviceTypeList": DEVICE_TYPES},
@@ -236,6 +240,12 @@ class CloudClient:
             total = result.get("totalNum")
             if not entries or not isinstance(total, int) or index >= total:
                 return devices
+        _LOGGER.warning(
+            "device list still incomplete after %d pages; using the first %d entries",
+            MAX_PAGES,
+            index,
+        )
+        return devices
 
     async def device_details(
         self, session: CloudSession, device: CloudDevice
