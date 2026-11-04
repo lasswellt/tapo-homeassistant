@@ -241,9 +241,9 @@ class CloudClient:
             if not entries or not isinstance(total, int) or index >= total:
                 return devices
         _LOGGER.warning(
-            "device list still incomplete after %d pages; using the first %d entries",
+            "device list still incomplete after %d pages; using the %d devices listed",
             MAX_PAGES,
-            index,
+            len(devices),
         )
         return devices
 
