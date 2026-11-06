@@ -43,6 +43,7 @@ from tapolink_proto.cloud.client import MAX_PAGES, PAGE_LIMIT
 pytestmark = pytest.mark.usefixtures("socket_enabled")
 
 CLOUD_HOSTS = ("*.tplinkcloud.com", "*.iot.i.tplinknbu.com")
+GATEWAY_HOST = "n-wap-gw.tplinkcloud.com"
 IOT_HOST = "use1-app-server.iot.i.tplinknbu.com"
 
 
@@ -150,21 +151,27 @@ class _Reply:
 
 @dataclass(slots=True)
 class FakeCloud:
-    """Scripted cloud endpoints; unscripted requests get 599 and are recorded."""
+    """Scripted cloud endpoints keyed on (method, host, path).
+
+    A request matching no script gets 599 and is kept in ``unscripted``; the
+    ``cloud`` fixture fails the test if any remain, so a wrong host or path
+    cannot pass as an expected error."""
 
     requests: list[Recorded] = field(default_factory=list)
-    routes: dict[tuple[str, str], list[_Reply]] = field(default_factory=dict)
-    repeating: set[tuple[str, str]] = field(default_factory=set)
+    unscripted: list[Recorded] = field(default_factory=list)
+    routes: dict[tuple[str, str, str], list[_Reply]] = field(default_factory=dict)
+    repeating: set[tuple[str, str, str]] = field(default_factory=set)
     port: int = 0
 
     def script(
         self,
         method: str,
+        host: str,
         path: str,
         reply: _Reply,
         repeat: bool,
     ) -> None:
-        key = (method, "/" + path.lstrip("/"))
+        key = (method, host, "/" + path.lstrip("/"))
         self.routes.setdefault(key, []).append(reply)
         if repeat:
             self.repeating.add(key)
@@ -178,26 +185,27 @@ class FakeCloud:
         body: str | None = None,
         drop: bool = False,
         repeat: bool = False,
+        host: str = GATEWAY_HOST,
     ) -> None:
-        self.script("POST", path, _Reply(payload, status, body, drop), repeat)
+        self.script("POST", host, path, _Reply(payload, status, body, drop), repeat)
 
-    def get(self, path: str, payload: Any = None, *, repeat: bool = False) -> None:
-        self.script("GET", path, _Reply(payload), repeat)
+    def get(self, path: str, payload: Any = None, *, host: str = IOT_HOST) -> None:
+        self.script("GET", host, path, _Reply(payload), repeat=False)
 
     async def handle(self, request: web.Request) -> web.StreamResponse:
-        self.requests.append(
-            Recorded(
-                request.method,
-                request.headers.get("Host", ""),
-                request.path,
-                dict(request.query),
-                dict(request.headers),
-                await request.text(),
-            )
+        recorded = Recorded(
+            request.method,
+            request.headers.get("Host", "").partition(":")[0],
+            request.path,
+            dict(request.query),
+            dict(request.headers),
+            await request.text(),
         )
-        key = (request.method, request.path)
+        self.requests.append(recorded)
+        key = (recorded.method, recorded.host, recorded.path)
         queue = self.routes.get(key)
         if not queue:
+            self.unscripted.append(recorded)
             return web.Response(status=599, text="unscripted request")
         reply = queue[0] if key in self.repeating else queue.pop(0)
         if reply.drop:
@@ -225,6 +233,7 @@ async def cloud(cert_files: tuple[Path, Path]) -> AsyncIterator[FakeCloud]:
         yield fake
     finally:
         await runner.cleanup()
+    assert not fake.unscripted, f"unscripted requests: {fake.unscripted}"
 
 
 @pytest.fixture
@@ -430,7 +439,7 @@ async def test_malicious_region_uses_default_host(
     cloud.get(f"/v1/things/{1:040X}/details", {"ip": "192.168.1.20"})
     await client.device_details(SESSION, dev)
     assert cloud.requests[0].headers["Authorization"] == "ut|tok"
-    assert cloud.requests[0].host.startswith(IOT_HOST)
+    assert cloud.requests[0].host == IOT_HOST
     assert resolver.lookups == [IOT_HOST]
     assert all("evil.com" not in r.host for r in cloud.requests)
 
