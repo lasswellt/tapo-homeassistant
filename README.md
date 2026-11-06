@@ -118,7 +118,7 @@ Contract drift against core is checked by `tools/check_core_tplink_contract.sh`.
 
 ## Status
 
-Phase 1a is released as v0.1.0: `tapo_onboard` and `tapolink-proto` (a cloud-only
+Phase 1a is released (latest v0.1.1): `tapo_onboard` and `tapolink-proto` (a cloud-only
 library). It was verified on Home Assistant 2026.10.4 with real devices on
 2026-11-01: 19 of 20 selected devices were onboarded without typing an IP, and the
 one failure was a bulb that was offline. Recovering a device that moved IP is covered
