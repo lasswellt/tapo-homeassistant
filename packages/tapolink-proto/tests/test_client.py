@@ -184,14 +184,17 @@ async def test_list_devices_advances_by_entries_returned(
 async def test_list_devices_stops_at_page_cap(
     mocked: aioresponses, client: CloudClient, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A cloud that never reaches its reported total cannot page forever."""
+    """A cloud that never reaches its reported total cannot page forever.
+
+    One malformed entry per page makes the devices returned differ from the
+    entries seen, so the warning must report the former."""
     path = "api/v2/common/getDeviceListByPage"
     mocked.post(
         url(path),
         payload={
             "error_code": 0,
             "result": {
-                "deviceList": [device(i) for i in range(PAGE_LIMIT)],
+                "deviceList": [device(i) for i in range(PAGE_LIMIT - 1)] + ["junk"],
                 "totalNum": 10**9,
             },
         },
@@ -200,8 +203,9 @@ async def test_list_devices_stops_at_page_cap(
     devices = await client.list_devices(SESSION)
     calls = next(iter(mocked.requests.values()))
     assert len(calls) == MAX_PAGES
-    assert len(devices) == MAX_PAGES * PAGE_LIMIT
+    assert len(devices) == MAX_PAGES * (PAGE_LIMIT - 1) == 2900
     assert "still incomplete after 100 pages" in caplog.text
+    assert "using the 2900 devices listed" in caplog.text
 
 
 async def test_rate_limited(mocked: aioresponses, client: CloudClient) -> None:
