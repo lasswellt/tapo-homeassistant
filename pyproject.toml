@@ -10,7 +10,6 @@ dependencies = []
 [dependency-groups]
 dev = [
     "pytest-homeassistant-custom-component",
-    "aioresponses",
     "mypy",
     "ruff",
     "tapolink-proto",
