@@ -8,11 +8,11 @@ rules:
   common-modules: done
   config-flow: done
   config-flow-test-coverage:
-    status: todo
-    comment: config_flow.py is at 93% in the HA harness; needs 100%.
+    status: done
+    comment: config_flow.py is at 100% line coverage in the HA harness (measured 2026-11-05).
   dependency-transparency:
-    status: todo
-    comment: tapolink-proto is Apache-2.0 but not yet on PyPI; it has no public CI or trusted publishing yet.
+    status: done
+    comment: tapolink-proto is Apache-2.0, developed in this public repository and published to PyPI by its GitHub Actions workflow (publish.yml) with trusted publishing.
   docs-actions:
     status: exempt
     comment: No custom actions or services are registered.
@@ -59,8 +59,8 @@ rules:
     comment: No entity platforms; the single cloud coordinator does not run entity updates.
   reauthentication-flow: done
   test-coverage:
-    status: todo
-    comment: Measured 95% overall, but config_flow.py is 93% and coordinator.py is 94%; the rule needs more than 95% per module.
+    status: done
+    comment: Every module is above 95% (measured 2026-11-05; config_flow.py 100%, the lowest is onboarding.py at 97%).
   # Gold
   devices:
     status: exempt
