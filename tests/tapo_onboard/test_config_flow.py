@@ -78,6 +78,10 @@ DEVICES = [
 ]
 
 
+class _FatalError(BaseException):
+    """Escapes the flow's per-device ``except Exception`` and fails the task."""
+
+
 class FakeCloudClient:
     """Scripted CloudClient (public-method boundary only)."""
 
@@ -85,6 +89,10 @@ class FakeCloudClient:
     login_error: Exception | None = None
     submit_error: Exception | None = None
     mfa: bool = False
+    mfa_request_error: Exception | None = None
+    list_error: Exception | None = None
+    details_block: asyncio.Event | None = None
+    details_fatal: bool = False
     details_error_on: str | None = None
     details_cancel_on: str | None = None
     no_ip_on: str | None = None
@@ -101,7 +109,8 @@ class FakeCloudClient:
         return CloudSession("tok", "ref", 42)
 
     async def request_mfa_code(self, username: str, password: str) -> None:
-        return None
+        if self.mfa_request_error:
+            raise self.mfa_request_error
 
     async def submit_mfa_code(
         self, username: str, process_id: str, code: str
@@ -112,12 +121,18 @@ class FakeCloudClient:
         return CloudSession("tok", "ref", 42)
 
     async def list_devices(self, session: CloudSession) -> list[CloudDevice]:
+        if self.list_error:
+            raise self.list_error
         return self.devices
 
     async def device_details(
         self, session: CloudSession, device: CloudDevice
     ) -> DeviceDetails:
         self.details_calls.append(device.mac)
+        if self.details_fatal:
+            raise _FatalError
+        if self.details_block is not None:
+            await self.details_block.wait()
         if device.mac == self.no_ip_on:
             return DeviceDetails(ip=None, ssid=None, fw_ver=None)
         if device.mac == self.details_cancel_on:
@@ -153,6 +168,10 @@ def fake_cloud(hass: HomeAssistant) -> Iterator[type[FakeCloudClient]]:
     FakeCloudClient.login_error = None
     FakeCloudClient.submit_error = None
     FakeCloudClient.mfa = False
+    FakeCloudClient.mfa_request_error = None
+    FakeCloudClient.list_error = None
+    FakeCloudClient.details_block = None
+    FakeCloudClient.details_fatal = False
     FakeCloudClient.details_error_on = None
     FakeCloudClient.details_cancel_on = None
     FakeCloudClient.no_ip_on = None
@@ -277,6 +296,77 @@ async def test_mfa_submit_error(
         result["flow_id"], {"code": "123456"}
     )
     assert result["errors"] == {"base": "invalid_auth"}
+
+
+async def test_mfa_request_error(
+    hass: HomeAssistant, fake_cloud: type[FakeCloudClient]
+) -> None:
+    fake_cloud.mfa = True
+    fake_cloud.mfa_request_error = CloudUnavailable("down")
+    result = await _login(hass)
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "user"
+    assert result["errors"] == {"base": "cannot_connect"}
+
+
+async def test_list_devices_error(
+    hass: HomeAssistant, fake_cloud: type[FakeCloudClient]
+) -> None:
+    fake_cloud.list_error = CloudAuthError(-20601)
+    result = await _login(hass)
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "user"
+    assert result["errors"] == {"base": "invalid_auth"}
+
+
+async def test_onboarding_task_cancelled_warns(
+    hass: HomeAssistant,
+    fake_cloud: type[FakeCloudClient],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fake_cloud.details_block = asyncio.Event()
+    result = await _login(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"devices": [STUB_MAC]}
+    )
+    assert result["type"] == FlowResultType.SHOW_PROGRESS
+    flow = hass.config_entries.flow._progress[result["flow_id"]]
+    task = flow._task
+    assert task is not None
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    result = await hass.config_entries.flow.async_configure(result["flow_id"])
+    while result["type"] == FlowResultType.SHOW_PROGRESS:
+        await hass.async_block_till_done()
+        result = await hass.config_entries.flow.async_configure(result["flow_id"])
+    assert "Onboarding was cancelled" in caplog.text
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    ph = result["description_placeholders"]
+    assert ph is not None
+    assert ph["added"] == "0"
+    assert ph["failed"] == "1"
+
+
+async def test_onboarding_task_failed_logs_error(
+    hass: HomeAssistant,
+    fake_cloud: type[FakeCloudClient],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fake_cloud.details_fatal = True
+    result = await _login(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"devices": [STUB_MAC]}
+    )
+    while result["type"] == FlowResultType.SHOW_PROGRESS:
+        await hass.async_block_till_done()
+        result = await hass.config_entries.flow.async_configure(result["flow_id"])
+    assert "Onboarding failed: _FatalError" in caplog.text
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    ph = result["description_placeholders"]
+    assert ph is not None
+    assert ph["added"] == "0"
+    assert ph["failed"] == "1"
 
 
 async def test_already_configured(hass: HomeAssistant) -> None:
