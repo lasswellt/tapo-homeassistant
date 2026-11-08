@@ -10,7 +10,10 @@ it records each request for the call-count and header assertions.
 
 from __future__ import annotations
 
+import base64
 import datetime
+import hashlib
+import hmac
 import json
 import socket
 import ssl
@@ -45,6 +48,10 @@ pytestmark = pytest.mark.usefixtures("socket_enabled")
 CLOUD_HOSTS = ("*.tplinkcloud.com", "*.iot.i.tplinknbu.com")
 GATEWAY_HOST = "n-wap-gw.tplinkcloud.com"
 IOT_HOST = "use1-app-server.iot.i.tplinknbu.com"
+# Public Tapo iOS app constants (CLAUDE.md cheat sheet), restated here so the
+# signature check does not trust the module under test.
+ACCESS_KEY = "4d11b6b9d5ea4d19a829adbb9714b057"
+APP_SECRET = b"6ed7d97f3e73467f8a5bab90b577ba4c"
 
 
 def _is_cloud_host(host: str) -> bool:
@@ -153,9 +160,10 @@ class _Reply:
 class FakeCloud:
     """Scripted cloud endpoints keyed on (method, host, path).
 
-    A request matching no script gets 599 and is kept in ``unscripted``; the
-    ``cloud`` fixture fails the test if any remain, so a wrong host or path
-    cannot pass as an expected error."""
+    A request matching no script gets 599 and is kept in ``unscripted``. The
+    ``cloud`` fixture fails the test if any request was unscripted or any
+    one-shot reply went unused, so a wrong host or path cannot pass as an
+    expected error and a test cannot pass without making its request."""
 
     requests: list[Recorded] = field(default_factory=list)
     unscripted: list[Recorded] = field(default_factory=list)
@@ -234,6 +242,8 @@ async def cloud(cert_files: tuple[Path, Path]) -> AsyncIterator[FakeCloud]:
     finally:
         await runner.cleanup()
     assert not fake.unscripted, f"unscripted requests: {fake.unscripted}"
+    unused = {k: v for k, v in fake.routes.items() if v and k not in fake.repeating}
+    assert not unused, f"scripted replies never requested: {list(unused)}"
 
 
 @pytest.fixture
@@ -281,6 +291,28 @@ async def test_login_success(cloud: FakeCloud, client: CloudClient) -> None:
     assert body["cloudUserName"] == "me@example.com"
     assert body["terminalName"] == "Home Assistant"
     assert "X-Authorization" in call.headers
+    assert "token" not in call.query
+
+
+async def test_post_wire_format(cloud: FakeCloud, client: CloudClient) -> None:
+    """Content-MD5, the HMAC-SHA1 signature and the query string, recomputed
+    from the recorded request (RESEARCH §3.1)."""
+    cloud.post(LIST, {"error_code": 0, "result": {"deviceList": [], "totalNum": 0}})
+    await client.list_devices(SESSION)
+    call = cloud.requests[0]
+    md5 = base64.b64encode(hashlib.md5(call.body.encode()).digest()).decode()
+    assert call.headers["Content-MD5"] == md5
+    auth = dict(
+        part.split("=", 1) for part in call.headers["X-Authorization"].split(", ")
+    )
+    assert auth["AccessKey"] == ACCESS_KEY
+    content = f"{md5}\n{auth['Timestamp']}\n{auth['Nonce']}\n{call.path}"
+    expected = hmac.new(APP_SECRET, content.encode(), hashlib.sha1).hexdigest()
+    assert auth["Signature"] == expected
+    assert call.query["termID"] == "T-UUID"
+    assert call.query["appName"] == "TP-Link_Tapo_iOS"
+    assert call.query["appVer"] == "2.8.21"
+    assert call.query["token"] == "tok"
 
 
 async def test_login_mfa_required(cloud: FakeCloud, client: CloudClient) -> None:
