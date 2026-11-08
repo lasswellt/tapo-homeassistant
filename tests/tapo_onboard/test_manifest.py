@@ -16,4 +16,4 @@ async def test_manifest_loads(hass: HomeAssistant) -> None:
     assert "dhcp" in integration.dependencies
     assert "tplink" in integration.after_dependencies
     assert integration.config_flow is True
-    assert integration.requirements == ["tapolink-proto==0.1.1"]
+    assert integration.requirements == ["tapolink-proto==0.1.2"]

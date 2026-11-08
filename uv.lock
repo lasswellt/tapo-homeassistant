@@ -4399,7 +4399,7 @@ dev = [
 
 [[package]]
 name = "tapolink-proto"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "packages/tapolink-proto" }
 dependencies = [
     { name = "aiohttp", version = "3.13.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14.2'" },
