@@ -1,6 +1,6 @@
 [project]
 name = "tapolink-proto"
-version = "0.1.2"
+version = "0.2.0"
 description = "Clean-room async TP-Link Tapo cloud inventory client and TDP identity probe"
 readme = "README.md"
 requires-python = ">=3.13"

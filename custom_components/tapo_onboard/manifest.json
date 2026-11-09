@@ -19,7 +19,7 @@
     "tapolink_proto"
   ],
   "requirements": [
-    "tapolink-proto==0.1.2"
+    "tapolink-proto==0.2.0"
   ],
   "version": "0.1.2"
 }
