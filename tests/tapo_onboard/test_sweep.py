@@ -17,6 +17,7 @@ from homeassistant.config_entries import SOURCE_DHCP, ConfigEntryState
 from homeassistant.const import STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.device_registry import format_mac
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
@@ -366,3 +367,81 @@ async def test_lost_check_stops_on_unload(
     await entry._async_process_on_unload(hass)
     await _tick(hass, 200)
     assert len(udp.calls) == 1
+
+
+def _tpap_info(
+    mac: str = STUB_MAC,
+    ip: str = "192.168.1.5",
+    owner: str = USER,
+    scheme: dict[str, object] | None = None,
+    tpap: dict[str, object] | None = None,
+) -> TdpInfo:
+    result: dict[str, object] = {
+        "device_id": _md5(f"id-{mac}"),
+        "mac": mac,
+        "owner": _md5(owner),
+        "ip": ip,
+        "device_model": "P110(US)",
+        "mgt_encrypt_schm": scheme or {"encrypt_type": "TPAP"},
+    }
+    if tpap is not None:
+        result["tpap"] = tpap
+    info = TdpInfo.from_result(result)
+    assert info is not None
+    return info
+
+
+def _issue(hass: HomeAssistant, entry: MockConfigEntry) -> Any:
+    return ir.async_get(hass).async_get_issue(
+        "tapo_onboard", f"tpap_firmware_detected_{entry.entry_id}"
+    )
+
+
+async def test_tpap_issue_created_then_deleted(
+    hass: HomeAssistant, stub: type[StubTplinkFlow], udp: FakeSweep
+) -> None:
+    udp.replies = [_tpap_info()]
+    entry = _entry(hass)
+    coord = _coord(hass, entry)
+    await coord.async_refresh()
+    issue = _issue(hass, entry)
+    assert issue is not None
+    assert not issue.is_fixable
+    devices = issue.translation_placeholders["devices"]
+    assert "P110" in devices
+    assert "192.168.1.5" in devices
+    assert STUB_MAC not in devices
+    assert coord.data.tpap == (STUB_MAC,)
+    udp.replies = [_info()]
+    await coord.async_refresh()
+    assert _issue(hass, entry) is None
+    assert coord.data.tpap == ()
+
+
+async def test_tpap_block_with_klap_scheme_counts(
+    hass: HomeAssistant, stub: type[StubTplinkFlow], udp: FakeSweep
+) -> None:
+    udp.replies = [_tpap_info(scheme={"encrypt_type": "KLAP"}, tpap={"port": 443})]
+    entry = _entry(hass)
+    await _coord(hass, entry).async_refresh()
+    assert _issue(hass, entry) is not None
+
+
+async def test_tpap_foreign_device_no_issue(
+    hass: HomeAssistant, stub: type[StubTplinkFlow], udp: FakeSweep
+) -> None:
+    udp.replies = [_tpap_info(owner="other@example.com")]
+    entry = _entry(hass)
+    await _coord(hass, entry).async_refresh()
+    assert _issue(hass, entry) is None
+
+
+async def test_tpap_issue_deleted_on_unload(
+    hass: HomeAssistant, stub: type[StubTplinkFlow], udp: FakeSweep
+) -> None:
+    udp.replies = [_tpap_info()]
+    entry = _entry(hass)
+    await _coord(hass, entry).async_refresh()
+    assert _issue(hass, entry) is not None
+    await entry._async_process_on_unload(hass)
+    assert _issue(hass, entry) is None

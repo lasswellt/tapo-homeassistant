@@ -20,6 +20,7 @@ from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.const import STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.device_registry import format_mac
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
@@ -67,6 +68,13 @@ class SweepState:
     host_updates: tuple[str, ...]
     # Replies owned by another account: diagnostics only.
     foreign: int
+    # MACs of owned devices advertising TPAP: diagnostics only.
+    tpap: tuple[str, ...] = ()
+
+
+def advertises_tpap(info: TdpInfo) -> bool:
+    """Return True when the TDP reply shows the TPAP login scheme."""
+    return (info.encrypt_type or "").upper() == "TPAP" or bool(info.tpap)
 
 
 def _model_base(model: str | None) -> str:
@@ -122,6 +130,10 @@ class SweepCoordinator(DataUpdateCoordinator[SweepState]):
         self._entry = entry
         self._password = password
         self._username = username
+        self._issue_id = f"tpap_firmware_detected_{entry.entry_id}"
+        entry.async_on_unload(
+            lambda: ir.async_delete_issue(hass, DOMAIN, self._issue_id)
+        )
         self._attempted: set[str] = set()
         self._last_targeted: dict[IPv4Network, datetime] = {}
         if flow_result is not None:
@@ -199,6 +211,32 @@ class SweepCoordinator(DataUpdateCoordinator[SweepState]):
             except Exception as exc:  # noqa: BLE001 - isolate one subnet
                 LOGGER.debug("targeted sweep failed: %s", type(exc).__name__)
 
+    @callback
+    def _update_tpap_issue(self, owned: Mapping[str, TdpInfo]) -> tuple[str, ...]:
+        """Create or delete the TPAP repair; return the MACs advertising TPAP."""
+        tpap = sorted(
+            (i for i in owned.values() if advertises_tpap(i)),
+            key=lambda i: [int(p) if p.isdigit() else 0 for p in str(i.ip).split(".")],
+        )
+        if not tpap:
+            ir.async_delete_issue(self.hass, DOMAIN, self._issue_id)
+            return ()
+        ir.async_create_issue(
+            self.hass,
+            DOMAIN,
+            self._issue_id,
+            is_fixable=False,
+            is_persistent=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key="tpap_firmware_detected",
+            translation_placeholders={
+                "devices": ", ".join(
+                    f"{_model_base(i.device_model) or 'Tapo'} ({i.ip})" for i in tpap
+                )
+            },
+        )
+        return tuple(i.mac for i in tpap)
+
     async def _async_update_data(self) -> SweepState:
         networks = self.sweep_networks()
         if not networks:
@@ -213,6 +251,7 @@ class SweepCoordinator(DataUpdateCoordinator[SweepState]):
                     owned[info.mac] = info
             else:
                 foreign += 1
+        tpap_macs = self._update_tpap_issue(owned)
         outcomes: dict[str, OnboardOutcome] = {}
         host_updates: list[str] = []
         ignored = set(self._entry.data.get(CONF_IGNORED_MACS, []))
@@ -272,4 +311,5 @@ class SweepCoordinator(DataUpdateCoordinator[SweepState]):
             outcomes=outcomes,
             host_updates=tuple(host_updates),
             foreign=foreign,
+            tpap=tpap_macs,
         )

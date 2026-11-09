@@ -73,5 +73,11 @@
     "cloud_unavailable": {
       "message": "Your TP-Link Smart Home devices keep working. The TP-Link cloud is unreachable; retrying later."
     }
+  },
+  "issues": {
+    "tpap_firmware_detected": {
+      "title": "Tapo device uses new firmware (TPAP)",
+      "description": "These devices switched to TP-Link's newer TPAP login, which TP-Link Smart Home cannot use yet: {devices}. To use them here, open the Tapo app and turn on Me > Tapo Lab > Third-Party Compatibility. The devices keep working in the Tapo app."
+    }
   }
 }
