@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import hashlib
 import importlib
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import patch
 
@@ -17,7 +18,11 @@ from homeassistant.const import STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import format_mac
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from homeassistant.util import dt as dt_util
+from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
+    async_fire_time_changed,
+)
 from stub_tplink import STUB_MAC, StubTplinkFlow, stub_tplink
 from tapolink_proto.discovery import TdpInfo
 
@@ -256,3 +261,108 @@ async def test_no_networks_no_sweep(
     assert coord.last_update_success
     assert udp.calls == []
     assert coord.data.devices == {}
+
+
+async def _tick(hass: HomeAssistant, seconds: int) -> None:
+    onboarding = importlib.import_module("custom_components.tapo_onboard.onboarding")
+    await onboarding.async_get_tdp_query(hass)  # warm cached RSA query (executor)
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=seconds))
+    await hass.async_block_till_done()
+
+
+@pytest.fixture
+async def started(
+    hass: HomeAssistant,
+) -> AsyncIterator[Callable[[MockConfigEntry], None]]:
+    entries: list[MockConfigEntry] = []
+
+    def _start(entry: MockConfigEntry) -> None:
+        _coord(hass, entry).async_start_lost_check()
+        entries.append(entry)
+
+    yield _start
+    for entry in entries:
+        await entry._async_process_on_unload(hass)
+
+
+async def test_lost_check_updates_host(
+    hass: HomeAssistant,
+    stub: type[StubTplinkFlow],
+    udp: FakeSweep,
+    started: Callable[[MockConfigEntry], None],
+) -> None:
+    tp = _tplink(hass, ConfigEntryState.SETUP_RETRY)
+    udp.replies = [_info(ip="192.168.1.9")]
+    entry = _entry(hass)
+    started(entry)
+    await _tick(hass, 61)
+    assert udp.calls == [("192.168.1.0/24",)]
+    assert tp.data["host"] == "192.168.1.9"
+
+
+async def test_lost_check_same_ip_no_flow(
+    hass: HomeAssistant,
+    stub: type[StubTplinkFlow],
+    udp: FakeSweep,
+    started: Callable[[MockConfigEntry], None],
+) -> None:
+    tp = _tplink(hass, ConfigEntryState.SETUP_RETRY)
+    udp.replies = [_info(ip="192.168.1.1")]
+    started(_entry(hass))
+    await _tick(hass, 61)
+    assert len(udp.calls) == 1
+    assert tp.data["host"] == "192.168.1.1"
+    assert stub.dhcp_infos == []
+
+
+async def test_lost_check_nothing_lost_no_io(
+    hass: HomeAssistant,
+    stub: type[StubTplinkFlow],
+    udp: FakeSweep,
+    started: Callable[[MockConfigEntry], None],
+) -> None:
+    _tplink(hass, ConfigEntryState.LOADED)
+    started(_entry(hass))
+    await _tick(hass, 61)
+    assert udp.calls == []
+
+
+async def test_lost_check_floor_per_subnet(
+    hass: HomeAssistant, stub: type[StubTplinkFlow], udp: FakeSweep
+) -> None:
+    _tplink(hass, ConfigEntryState.SETUP_RETRY)
+    coord = _coord(hass, _entry(hass))
+    await coord._async_check_lost()
+    await coord._async_check_lost()
+    assert len(udp.calls) == 1
+
+
+async def test_lost_check_foreign_owner_ignored(
+    hass: HomeAssistant,
+    stub: type[StubTplinkFlow],
+    udp: FakeSweep,
+    started: Callable[[MockConfigEntry], None],
+) -> None:
+    tp = _tplink(hass, ConfigEntryState.SETUP_RETRY)
+    udp.replies = [_info(ip="192.168.1.9", owner="other@example.com")]
+    started(_entry(hass))
+    await _tick(hass, 61)
+    assert len(udp.calls) == 1
+    assert tp.data["host"] == "192.168.1.1"
+    assert stub.dhcp_infos == []
+
+
+async def test_lost_check_stops_on_unload(
+    hass: HomeAssistant,
+    stub: type[StubTplinkFlow],
+    udp: FakeSweep,
+    started: Callable[[MockConfigEntry], None],
+) -> None:
+    _tplink(hass, ConfigEntryState.SETUP_RETRY)
+    entry = _entry(hass)
+    started(entry)
+    await _tick(hass, 61)
+    assert len(udp.calls) == 1
+    await entry._async_process_on_unload(hass)
+    await _tick(hass, 200)
+    assert len(udp.calls) == 1

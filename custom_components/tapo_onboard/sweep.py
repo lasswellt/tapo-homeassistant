@@ -12,13 +12,18 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from ipaddress import IPv4Network
+from typing import Final
 
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.const import STATE_UNAVAILABLE
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.device_registry import format_mac
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.util import dt as dt_util
 from tapolink_proto.discovery import (
     SweepRangeError,
     TdpInfo,
@@ -32,6 +37,7 @@ from .const import (
     CONF_SUBNETS,
     DOMAIN,
     LOGGER,
+    LOST_CHECK_INTERVAL,
     SWEEP_INTERVAL,
     TPLINK_DOMAIN,
     UNSUPPORTED_IN_CORE_MODELS,
@@ -45,6 +51,9 @@ from .onboarding import (
     async_onboard_device,
     async_tplink_entry_for_mac,
 )
+
+# Minimum gap between targeted sweeps of the same subnet.
+TARGETED_SWEEP_FLOOR: Final = timedelta(seconds=60)
 
 _BROKEN_STATES = frozenset({ConfigEntryState.SETUP_RETRY, ConfigEntryState.SETUP_ERROR})
 
@@ -114,6 +123,7 @@ class SweepCoordinator(DataUpdateCoordinator[SweepState]):
         self._password = password
         self._username = username
         self._attempted: set[str] = set()
+        self._last_targeted: dict[IPv4Network, datetime] = {}
         if flow_result is not None:
             self._attempted.update(
                 mac for mac, o in flow_result.outcomes.items() if o in _TERMINAL
@@ -140,6 +150,54 @@ class SweepCoordinator(DataUpdateCoordinator[SweepState]):
         except SweepRangeError as exc:
             LOGGER.debug("stored subnets rejected (%s)", exc.reason)
             return ()
+
+    @callback
+    def async_start_lost_check(self) -> None:
+        """Check for lost `tplink` entries every `LOST_CHECK_INTERVAL`."""
+        self._entry.async_on_unload(
+            async_track_time_interval(
+                self.hass, self._async_check_lost, LOST_CHECK_INTERVAL
+            )
+        )
+
+    async def _async_check_lost(self, _now: datetime | None = None) -> None:
+        """Sweep the subnet of each lost `tplink` entry, at most once per floor."""
+        by_subnet: dict[IPv4Network, list[tuple[str, str]]] = {}
+        for tp in self.hass.config_entries.async_entries(TPLINK_DOMAIN):
+            host = tp.data.get("host")
+            if not tp.unique_id or not isinstance(host, str):
+                continue
+            if not is_lost(self.hass, tp):
+                continue
+            try:
+                subnet = network_of(host)
+            except SweepRangeError:
+                continue
+            by_subnet.setdefault(subnet, []).append((format_mac(tp.unique_id), host))
+        if not by_subnet:
+            return
+        query = await async_get_tdp_query(self.hass)
+        for subnet, lost in by_subnet.items():
+            now = dt_util.utcnow()
+            last = self._last_targeted.get(subnet)
+            if last is not None and now - last < TARGETED_SWEEP_FLOOR:
+                continue
+            self._last_targeted[subnet] = now
+            try:
+                infos = await async_sweep([subnet], query=query)
+                for info in infos:
+                    if not info.ip or not info.owned_by(self._username):
+                        continue
+                    mac = format_mac(info.mac)
+                    if any(m == mac and h != info.ip for m, h in lost):
+                        await async_hand_off_if_verified(
+                            self.hass,
+                            host=info.ip,
+                            mac=info.mac,
+                            owner_email=self._username,
+                        )
+            except Exception as exc:  # noqa: BLE001 - isolate one subnet
+                LOGGER.debug("targeted sweep failed: %s", type(exc).__name__)
 
     async def _async_update_data(self) -> SweepState:
         networks = self.sweep_networks()
