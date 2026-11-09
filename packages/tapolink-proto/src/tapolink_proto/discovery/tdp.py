@@ -128,6 +128,15 @@ class TdpInfo:
         digest = hashlib.md5(cloud_device_id.encode()).hexdigest()  # noqa: S324
         return self.device_id.lower() == digest
 
+    def owned_by(self, email: str) -> bool:
+        """True if ``owner`` is MD5 of ``email`` as typed or lowercased."""
+        if not self.owner:
+            return False
+        owner = self.owner.lower()
+        typed = hashlib.md5(email.encode()).hexdigest()  # noqa: S324
+        lowered = hashlib.md5(email.lower().encode()).hexdigest()  # noqa: S324
+        return owner in (typed, lowered)
+
     def matches_mac(self, mac: str) -> bool:
         """Compare MACs ignoring case and ``-``/``:`` separators."""
         return _norm_mac(mac) == self.mac
