@@ -2,6 +2,14 @@
   "config": {
     "step": {
       "user": {
+        "title": "Add Tapo devices",
+        "description": "Local mode finds your devices by asking them directly on your network. It needs the subnets your devices are on and UDP port 20002 reachable from Home Assistant.",
+        "menu_options": {
+          "local": "Find devices on my network (recommended, no cloud)",
+          "cloud": "Use my TP-Link cloud account"
+        }
+      },
+      "cloud": {
         "title": "Sign in to TP-Link cloud",
         "description": "Sign in with your TP-Link/Tapo account. The password is only used to add your devices to TP-Link Smart Home and is not stored in the config entry.",
         "data": {
@@ -11,6 +19,20 @@
         "data_description": {
           "username": "The email address of your TP-Link/Tapo account.",
           "password": "The password of your TP-Link/Tapo account."
+        }
+      },
+      "local": {
+        "title": "Find devices on your network",
+        "description": "Enter your TP-Link/Tapo account email and password. The email only filters the devices to those owned by your account, and nothing is sent to TP-Link's cloud. The password is only used to add your devices to TP-Link Smart Home and is not stored in the config entry.",
+        "data": {
+          "username": "Email",
+          "password": "Password",
+          "subnets": "Subnets"
+        },
+        "data_description": {
+          "username": "The email address of your TP-Link/Tapo account. Only devices owned by this account are added.",
+          "password": "The password of your TP-Link/Tapo account, used to log in to the devices on your network.",
+          "subnets": "Networks to search, as comma-separated CIDRs such as 192.168.1.0/24. Up to 4096 addresses in total."
         }
       },
       "mfa": {
@@ -45,6 +67,7 @@
       }
     },
     "progress": {
+      "sweeping": "Looking for your Tapo devices on the network.",
       "onboarding": "Adding your devices to TP-Link Smart Home."
     },
     "error": {
@@ -52,7 +75,10 @@
       "invalid_auth": "Invalid email or password.",
       "rate_limited": "Too many attempts. Try again in {minutes} minutes.",
       "unknown": "Unexpected error.",
-      "invalid_code": "The code must be 6 digits."
+      "invalid_code": "The code must be 6 digits.",
+      "invalid_subnets": "Enter one or more private IPv4 networks such as 192.168.1.0/24, separated by commas.",
+      "not_private": "Only private networks (such as 192.168.1.0/24) can be searched.",
+      "too_many_hosts": "Too many addresses. Search at most 4096 addresses in total, for example sixteen /24 networks."
     },
     "abort": {
       "already_configured": "This account is already configured.",

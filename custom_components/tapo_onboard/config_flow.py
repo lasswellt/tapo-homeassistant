@@ -6,15 +6,19 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+from ipaddress import IPv4Network
 from typing import Any
 from uuid import uuid4
 
 import probatio as vol
+from homeassistant.components import network
 from homeassistant.config_entries import ConfigEntryState, ConfigFlow, ConfigFlowResult
-from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
+from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_USERNAME
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
     SelectOptionDict,
@@ -38,22 +42,39 @@ from tapolink_proto.cloud import (
     MfaRequired,
     build_cloud_ssl_context,
 )
+from tapolink_proto.discovery import (
+    SweepRangeError,
+    TdpInfo,
+    async_sweep,
+    network_of,
+    parse_networks,
+)
 
 from .const import (
     CONF_ACCOUNT_ID,
     CONF_IGNORED_MACS,
+    CONF_MODE,
     CONF_REFRESH_TOKEN,
+    CONF_SUBNETS,
     CONF_TERMINAL_UUID,
     CONF_TOKEN,
     DATA_FLOW_RESULT,
     DATA_PENDING_PASSWORD,
     DOMAIN,
     LOGGER,
+    MODE_LOCAL,
     PARTIAL_IN_CORE_MODELS,
+    TPLINK_DOMAIN,
     UNSUPPORTED_IN_CORE_MODELS,
 )
 from .coordinator import FlowResult
-from .onboarding import OnboardOutcome, async_onboard_device, async_tplink_entry_for_mac
+from .onboarding import (
+    OnboardOutcome,
+    async_get_tdp_query,
+    async_onboard_device,
+    async_tplink_entry_for_mac,
+)
+from .sweep import _model_base
 
 _FAILED = frozenset(
     {
@@ -65,6 +86,26 @@ _FAILED = frozenset(
 
 CONF_CODE = "code"
 CONF_DEVICES = "devices"
+
+_SUBNET_ERRORS = {
+    "invalid": "invalid_subnets",
+    "not_ipv4": "invalid_subnets",
+    "not_private": "not_private",
+    "too_wide": "too_many_hosts",
+    "too_many_hosts": "too_many_hosts",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class _Candidate:
+    """A device the user may onboard, from the cloud list or a local sweep."""
+
+    mac: str
+    label: str
+    model: str | None
+    model_base: str
+    host: str | None
+    device_id: str | None
 
 
 class _Kind(StrEnum):
@@ -88,6 +129,11 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
         self._process_id = ""
         self._session: CloudSession | None = None
         self._devices: list[CloudDevice] = []
+        self._candidates: list[_Candidate] = []
+        self._local = False
+        self._networks: list[str] = []
+        self._subnets_text = ""
+        self._foreign = 0
         self._selected: set[str] = set()
         self._ignored: list[str] = []
         self._outcomes: dict[str, OnboardOutcome] = {}
@@ -127,13 +173,132 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
             }
         )
         return self.async_show_form(
-            step_id="user",
+            step_id="cloud",
             data_schema=schema,
             errors=errors,
             description_placeholders=ph,
         )
 
     async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Offer local discovery or the TP-Link cloud account."""
+        return self.async_show_menu(step_id="user", menu_options=["local", "cloud"])
+
+    async def _prefill_subnets(self) -> list[str]:
+        """Return the private /24s of core `tplink` hosts and enabled adapters."""
+        addresses = [
+            str(entry.data[CONF_HOST])
+            for entry in self.hass.config_entries.async_entries(TPLINK_DOMAIN)
+            if entry.data.get(CONF_HOST)
+        ]
+        for adapter in await network.async_get_adapters(self.hass):
+            if adapter["enabled"]:
+                addresses.extend(ip4["address"] for ip4 in adapter["ipv4"])
+        found: list[str] = []
+        for address in addresses:
+            try:
+                net = network_of(address)
+            except SweepRangeError:
+                continue
+            if net.is_private and not net.is_loopback and not net.is_link_local:
+                if str(net) not in found:
+                    found.append(str(net))
+        return found
+
+    def _local_form(self, errors: dict[str, str]) -> ConfigFlowResult:
+        subnets_key = (
+            vol.Required(CONF_SUBNETS, default=self._subnets_text)
+            if self._subnets_text
+            else vol.Required(CONF_SUBNETS)
+        )
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_USERNAME, default=self._username): TextSelector(
+                    TextSelectorConfig(type=TextSelectorType.EMAIL)
+                ),
+                vol.Required(CONF_PASSWORD): TextSelector(
+                    TextSelectorConfig(type=TextSelectorType.PASSWORD)
+                ),
+                subnets_key: TextSelector(TextSelectorConfig()),
+            }
+        )
+        return self.async_show_form(step_id="local", data_schema=schema, errors=errors)
+
+    async def async_step_local(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Ask for the account email, password and the subnets to look in."""
+        if user_input is None:
+            self._subnets_text = ", ".join(await self._prefill_subnets())
+            return self._local_form({})
+        self._username = str(user_input[CONF_USERNAME]).strip()
+        self._password = user_input[CONF_PASSWORD]
+        self._subnets_text = str(user_input[CONF_SUBNETS]).strip()
+        values = [v for v in re.split(r"[,\s]+", self._subnets_text) if v]
+        errors: dict[str, str] = {}
+        networks: tuple[IPv4Network, ...] = ()
+        try:
+            networks = parse_networks(values)
+        except SweepRangeError as err:
+            errors[CONF_SUBNETS] = _SUBNET_ERRORS.get(err.reason, "invalid_subnets")
+        if not networks and not errors:
+            errors[CONF_SUBNETS] = "invalid_subnets"
+        if errors:
+            return self._local_form(errors)
+        await self.async_set_unique_id(self._username.lower())
+        self._abort_if_unique_id_configured(reload_on_update=False)
+        self._local = True
+        self._networks = [str(n) for n in networks]
+        return await self.async_step_sweeping()
+
+    async def _sweep(self) -> None:
+        owned: list[TdpInfo] = []
+        foreign = 0
+        for info in await async_sweep(
+            self._networks, query=await async_get_tdp_query(self.hass)
+        ):
+            if info.ip is None:
+                continue
+            if info.owned_by(self._username):
+                owned.append(info)
+            else:
+                foreign += 1
+        self._foreign = foreign
+        self._candidates = [
+            _Candidate(
+                mac=info.mac,
+                label=f"{info.device_model or 'Tapo device'} at {info.ip}",
+                model=None,
+                model_base=_model_base(info.device_model),
+                host=info.ip,
+                device_id=None,
+            )
+            for info in owned
+        ]
+
+    async def async_step_sweeping(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Sweep the subnets as a progress step."""
+        if self._task is None:
+            self._task = self.hass.async_create_task(self._sweep())
+        if not self._task.done():
+            return self.async_show_progress(
+                step_id="sweeping",
+                progress_action="sweeping",
+                progress_task=self._task,
+            )
+        task, self._task = self._task, None
+        if task.cancelled():
+            LOGGER.debug("Sweep was cancelled")
+        elif (err := task.exception()) is not None:
+            LOGGER.debug("Sweep failed: %s", type(err).__name__)
+        return self.async_show_progress_done(
+            next_step_id="pick_devices" if self._candidates else "finish"
+        )
+
+    async def async_step_cloud(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Ask for the TP-Link cloud account and sign in."""
@@ -204,6 +369,17 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
         try:
             self._devices = await self._client.list_devices(self._session)
             self._listed_at = dt_util.utcnow()
+            self._candidates = [
+                _Candidate(
+                    mac=d.mac,
+                    label=d.alias,
+                    model=d.model,
+                    model_base=d.model_base,
+                    host=None,
+                    device_id=d.device_id,
+                )
+                for d in self._devices
+            ]
         except Exception as err:  # noqa: BLE001 - mapped to a form error
             key, ph = self._error(err)
             return self._user_form({"base": key}, ph)
@@ -267,7 +443,7 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
             )
         return result
 
-    def _classify(self, device: CloudDevice) -> _Kind:
+    def _classify(self, device: _Candidate) -> _Kind:
         if async_tplink_entry_for_mac(self.hass, device.mac) is not None:
             return _Kind.ALREADY_IN_TPLINK
         if device.model_base in UNSUPPORTED_IN_CORE_MODELS:
@@ -283,18 +459,20 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             self._selected = set(user_input[CONF_DEVICES])
             self._ignored = sorted(
-                d.mac for d in self._devices if d.mac not in self._selected
+                d.mac for d in self._candidates if d.mac not in self._selected
             )
             return await self.async_step_onboarding()
         options: list[SelectOptionDict] = []
         ticked: list[str] = []
-        for device in sorted(self._devices, key=lambda d: d.alias.lower()):
+        for device in sorted(self._candidates, key=lambda d: d.label.lower()):
             kind = self._classify(device)
+            name = (
+                device.label
+                if device.model is None
+                else (f"{device.label} ({device.model})")
+            )
             options.append(
-                SelectOptionDict(
-                    value=device.mac,
-                    label=f"{device.alias} ({device.model}) – {kind.value}",
-                )
+                SelectOptionDict(value=device.mac, label=f"{name} – {kind.value}")
             )
             if kind in (_Kind.READY, _Kind.PARTIAL):
                 ticked.append(device.mac)
@@ -312,20 +490,25 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(step_id="pick_devices", data_schema=schema)
 
     async def _onboard_selected(self) -> None:
-        assert self._client is not None and self._session is not None  # noqa: S101
-        for device in self._devices:
+        cloud = {d.mac: d for d in self._devices}
+        for device in self._candidates:
             if device.mac not in self._selected:
                 continue
             if async_tplink_entry_for_mac(self.hass, device.mac) is not None:
                 self._outcomes[device.mac] = OnboardOutcome.ALREADY_CONFIGURED
                 continue
-            self._details_at[device.mac] = dt_util.utcnow()
-            try:
-                details = await self._client.device_details(self._session, device)
-                ip = details.ip
-            except Exception:  # noqa: BLE001 - one device must not stop the rest
-                LOGGER.debug("device_details failed for %s", device.mac)
-                ip = None
+            ip = device.host
+            if ip is None:
+                assert self._client is not None and self._session is not None  # noqa: S101
+                self._details_at[device.mac] = dt_util.utcnow()
+                try:
+                    details = await self._client.device_details(
+                        self._session, cloud[device.mac]
+                    )
+                    ip = details.ip
+                except Exception:  # noqa: BLE001 - one device must not stop the rest
+                    LOGGER.debug("device_details failed for %s", device.mac)
+                    ip = None
             if ip is None:
                 self._outcomes[device.mac] = OnboardOutcome.CANNOT_CONNECT
                 continue
@@ -334,6 +517,7 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
                 host=ip,
                 mac=device.mac,
                 device_id=device.device_id,
+                owner_email=self._username if device.device_id is None else None,
                 username=self._username,
                 password=self._password,
             )
@@ -363,7 +547,6 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Create the entry and hand the password to setup via memory."""
-        assert self._session is not None  # noqa: S101
         unique_id = self._username.lower()
         self.hass.data.setdefault(DOMAIN, {}).setdefault(DATA_PENDING_PASSWORD, {})[
             unique_id
@@ -382,10 +565,29 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
         already = outcomes.count(OnboardOutcome.ALREADY_CONFIGURED)
         failed = sum(1 for o in outcomes if o in _FAILED)
         failed_names = sorted(
-            (d.alias for d in self._devices if self._outcomes.get(d.mac) in _FAILED),
+            (d.label for d in self._candidates if self._outcomes.get(d.mac) in _FAILED),
             key=str.lower,
         )
         failed_devices = f" ({', '.join(failed_names)})" if failed_names else ""
+        placeholders = {
+            "added": str(added),
+            "confirm": str(confirm),
+            "already": str(already),
+            "failed": str(failed),
+            "failed_devices": failed_devices,
+        }
+        if self._local:
+            return self.async_create_entry(
+                title=unique_id,
+                data={
+                    CONF_USERNAME: self._username,
+                    CONF_MODE: MODE_LOCAL,
+                    CONF_SUBNETS: list(self._networks),
+                    CONF_IGNORED_MACS: self._ignored,
+                },
+                description_placeholders=placeholders,
+            )
+        assert self._session is not None  # noqa: S101
         return self.async_create_entry(
             title=unique_id,
             data={
@@ -396,11 +598,5 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
                 CONF_ACCOUNT_ID: self._session.account_id,
                 CONF_IGNORED_MACS: self._ignored,
             },
-            description_placeholders={
-                "added": str(added),
-                "confirm": str(confirm),
-                "already": str(already),
-                "failed": str(failed),
-                "failed_devices": failed_devices,
-            },
+            description_placeholders=placeholders,
         )

@@ -154,6 +154,7 @@ def probe() -> Iterator[None]:
         return TdpInfo.from_result(
             {
                 "device_id": hashlib.md5(f"id-{mac}".encode()).hexdigest().upper(),
+                "owner": hashlib.md5(EMAIL.lower().encode()).hexdigest().upper(),
                 "mac": mac,
             }  # noqa: S324
         )
@@ -179,6 +180,7 @@ def fake_cloud(hass: HomeAssistant) -> Iterator[type[FakeCloudClient]]:
     base = "custom_components.tapo_onboard.config_flow"
     # Manifest depends on core `dhcp`, whose optional deps are not installed.
     mock_integration(hass, MockModule("dhcp"))
+    mock_integration(hass, MockModule("network"))
     with (
         stub_tplink(hass) as stub,
         patch(f"{base}.CloudClient", FakeCloudClient),
@@ -197,9 +199,19 @@ async def _start(hass: HomeAssistant) -> ConfigFlowResult:
 
 async def _login(hass: HomeAssistant) -> ConfigFlowResult:
     result = await _start(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"next_step_id": "cloud"}
+    )
     return await hass.config_entries.flow.async_configure(
         result["flow_id"], {"username": EMAIL, "password": PASSWORD}
     )
+
+
+async def test_user_step_is_menu(hass: HomeAssistant) -> None:
+    result = await _start(hass)
+    assert result["type"] == FlowResultType.MENU
+    assert result["step_id"] == "user"
+    assert result["menu_options"] == ["local", "cloud"]
 
 
 async def test_happy_path(hass: HomeAssistant) -> None:
@@ -282,7 +294,7 @@ async def test_login_errors(
     fake_cloud.login_error = error
     result = await _login(hass)
     assert result["type"] == FlowResultType.FORM
-    assert result["step_id"] == "user"
+    assert result["step_id"] == "cloud"
     assert result["errors"] == {"base": key}
 
 
@@ -305,7 +317,7 @@ async def test_mfa_request_error(
     fake_cloud.mfa_request_error = CloudUnavailable("down")
     result = await _login(hass)
     assert result["type"] == FlowResultType.FORM
-    assert result["step_id"] == "user"
+    assert result["step_id"] == "cloud"
     assert result["errors"] == {"base": "cannot_connect"}
 
 
@@ -315,7 +327,7 @@ async def test_list_devices_error(
     fake_cloud.list_error = CloudAuthError(-20601)
     result = await _login(hass)
     assert result["type"] == FlowResultType.FORM
-    assert result["step_id"] == "user"
+    assert result["step_id"] == "cloud"
     assert result["errors"] == {"base": "invalid_auth"}
 
 
@@ -530,3 +542,144 @@ async def test_auth_failed_counts_under_confirm(hass: HomeAssistant) -> None:
         "failed": "0",
         "failed_devices": "",
     }
+
+
+def _tdp(mac: str, ip: str, owner: str, model: str = "P110(US)") -> TdpInfo:
+    info = TdpInfo.from_result(
+        {
+            "device_id": "X",
+            "mac": mac,
+            "ip": ip,
+            "owner": hashlib.md5(owner.lower().encode()).hexdigest().upper(),  # noqa: S324
+            "device_model": model,
+        }
+    )
+    assert info is not None
+    return info
+
+
+ADAPTERS = [
+    {"enabled": True, "ipv4": [{"address": "10.0.0.2", "network_prefix": 24}]},
+    {"enabled": False, "ipv4": [{"address": "192.168.7.2", "network_prefix": 24}]},
+    {"enabled": True, "ipv4": [{"address": "8.8.8.8", "network_prefix": 24}]},
+]
+
+
+async def _local_form(hass: HomeAssistant) -> ConfigFlowResult:
+    result = await _start(hass)
+    return await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"next_step_id": "local"}
+    )
+
+
+async def test_local_path_adds_owned_device(hass: HomeAssistant) -> None:
+    swept: list[list[str]] = []
+
+    async def _sweep(networks: list[str], *, query: bytes) -> list[TdpInfo]:
+        swept.append(list(networks))
+        return [
+            _tdp(STUB_MAC, HOSTS[STUB_MAC], EMAIL),
+            _tdp(MAC_PARTIAL, HOSTS[MAC_PARTIAL], "other@example.com"),
+        ]
+
+    with (
+        patch(
+            "homeassistant.components.network.async_get_adapters",
+            return_value=ADAPTERS,
+        ),
+        patch("custom_components.tapo_onboard.config_flow.async_sweep", _sweep),
+        patch("custom_components.tapo_onboard.sweep.async_sweep", _sweep),
+    ):
+        result = await _local_form(hass)
+        assert result["step_id"] == "local"
+        schema = cast("vol.Schema", result["data_schema"]).schema
+        key = next(k for k in schema if k == "subnets")
+        assert key.default() == "10.0.0.0/24"
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {"username": EMAIL, "password": PASSWORD, "subnets": "10.0.0.0/24"},
+        )
+        while result["type"] == FlowResultType.SHOW_PROGRESS:
+            await hass.async_block_till_done()
+            result = await hass.config_entries.flow.async_configure(result["flow_id"])
+        assert result["step_id"] == "pick_devices"
+        schema = cast("vol.Schema", result["data_schema"]).schema
+        key = next(k for k in schema if k == "devices")
+        labels = {o["value"]: o["label"] for o in schema[key].config["options"]}
+        assert labels == {STUB_MAC: "P110(US) at 10.0.0.5 – ready"}
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"devices": [STUB_MAC]}
+        )
+        while result["type"] == FlowResultType.SHOW_PROGRESS:
+            await hass.async_block_till_done()
+            result = await hass.config_entries.flow.async_configure(result["flow_id"])
+        await hass.async_block_till_done()
+    assert swept[0] == ["10.0.0.0/24"]
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert result["data"] == {
+        "username": EMAIL,
+        "mode": "local",
+        "subnets": ["10.0.0.0/24"],
+        "ignored_macs": [],
+    }
+    assert result["title"] == EMAIL.lower()
+    assert hass.data[DOMAIN][DATA_PENDING_PASSWORD][EMAIL.lower()] == PASSWORD
+    assert [e.unique_id for e in hass.config_entries.async_entries("tplink")] == [
+        format_mac(STUB_MAC)
+    ]
+    ph = result["description_placeholders"]
+    assert ph is not None
+    assert ph["added"] == "1"
+
+
+async def test_local_no_devices_creates_entry(hass: HomeAssistant) -> None:
+    async def _sweep(networks: list[str], *, query: bytes) -> list[TdpInfo]:
+        raise OSError("no socket")
+
+    with (
+        patch(
+            "homeassistant.components.network.async_get_adapters",
+            return_value=[],
+        ),
+        patch("custom_components.tapo_onboard.config_flow.async_sweep", _sweep),
+        patch("custom_components.tapo_onboard.sweep.async_sweep", _sweep),
+    ):
+        result = await _local_form(hass)
+        schema = cast("vol.Schema", result["data_schema"]).schema
+        key = next(k for k in schema if k == "subnets")
+        assert key.default is vol.UNDEFINED
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {"username": EMAIL, "password": PASSWORD, "subnets": "10.1.0.0/24"},
+        )
+        while result["type"] == FlowResultType.SHOW_PROGRESS:
+            await hass.async_block_till_done()
+            result = await hass.config_entries.flow.async_configure(result["flow_id"])
+        await hass.async_block_till_done()
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert result["data"]["subnets"] == ["10.1.0.0/24"]
+    ph = result["description_placeholders"]
+    assert ph is not None
+    assert ph["added"] == "0"
+
+
+@pytest.mark.parametrize(
+    ("subnets", "key"),
+    [
+        ("not-a-cidr", "invalid_subnets"),
+        (" , ", "invalid_subnets"),
+        ("8.8.8.0/24", "not_private"),
+        ("10.0.0.0/8", "too_many_hosts"),
+        ("10.0.0.0/16 10.1.0.0/16", "too_many_hosts"),
+    ],
+)
+async def test_local_subnet_errors(hass: HomeAssistant, subnets: str, key: str) -> None:
+    with patch("homeassistant.components.network.async_get_adapters", return_value=[]):
+        result = await _local_form(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {"username": EMAIL, "password": PASSWORD, "subnets": subnets},
+        )
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "local"
+    assert result["errors"] == {"subnets": key}

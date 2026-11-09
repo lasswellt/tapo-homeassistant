@@ -308,6 +308,9 @@ async def _run_flow(hass: HomeAssistant) -> None:
         DOMAIN, context={"source": "user"}
     )
     result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"next_step_id": "cloud"}
+    )
+    result = await hass.config_entries.flow.async_configure(
         result["flow_id"], {"username": EMAIL, "password": "secret"}
     )
     result = await hass.config_entries.flow.async_configure(
