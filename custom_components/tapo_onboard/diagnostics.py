@@ -21,6 +21,7 @@ from .const import (
     CONF_TERMINAL_UUID,
     CONF_TOKEN,
 )
+from .sweep import SweepCoordinator
 
 TO_REDACT = {
     CONF_USERNAME,
@@ -34,7 +35,49 @@ TO_REDACT = {
     "mac",
     "alias",
     "ip",
+    "owner",
 }
+
+
+def _local_diagnostics(
+    entry: TapoOnboardConfigEntry, coordinator: SweepCoordinator
+) -> dict[str, Any]:
+    exc = coordinator.last_exception
+    status: dict[str, Any] = {
+        "last_update_success": coordinator.last_update_success,
+        "last_exception": type(exc).__name__ if exc is not None else None,
+    }
+    sweep: dict[str, Any] = {}
+    state = coordinator.data
+    if state is not None:
+        devices = list(state.devices.values())
+        sweep = {
+            "count": len(devices),
+            "by_model": dict(Counter(d.device_model for d in devices)),
+            "by_encrypt_type": dict(Counter(d.encrypt_type for d in devices)),
+            "tpap": len(state.tpap),
+            "foreign": state.foreign,
+            "outcomes": dict(Counter(o.value for o in state.outcomes.values())),
+            "host_updates": len(state.host_updates),
+            "devices": [
+                {
+                    "mac": d.mac,
+                    "ip": d.ip,
+                    "device_model": d.device_model,
+                    "encrypt_type": d.encrypt_type,
+                }
+                for d in devices
+            ],
+        }
+    return async_redact_data(
+        {
+            "mode": "local",
+            "entry": dict(entry.data),
+            "coordinator": status,
+            "sweep": sweep,
+        },
+        TO_REDACT,
+    )
 
 
 async def async_get_config_entry_diagnostics(
@@ -42,6 +85,8 @@ async def async_get_config_entry_diagnostics(
 ) -> dict[str, Any]:
     """Return redacted diagnostics for the entry."""
     coordinator = entry.runtime_data.coordinator
+    if isinstance(coordinator, SweepCoordinator):
+        return _local_diagnostics(entry, coordinator)
     exc = coordinator.last_exception
     cause = exc.__cause__ if exc is not None else None
     state = coordinator.data
@@ -74,6 +119,11 @@ async def async_get_config_entry_diagnostics(
             ],
         }
     return async_redact_data(
-        {"entry": dict(entry.data), "coordinator": status, "inventory": inventory},
+        {
+            "mode": "cloud",
+            "entry": dict(entry.data),
+            "coordinator": status,
+            "inventory": inventory,
+        },
         TO_REDACT,
     )

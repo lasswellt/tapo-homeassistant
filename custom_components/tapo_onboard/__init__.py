@@ -13,16 +13,25 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from tapolink_proto.cloud import CloudClient, build_cloud_ssl_context
 
-from .const import CONF_TERMINAL_UUID, DATA_FLOW_RESULT, DATA_PENDING_PASSWORD, DOMAIN
+from .const import (
+    CONF_MODE,
+    CONF_TERMINAL_UUID,
+    DATA_FLOW_RESULT,
+    DATA_PENDING_PASSWORD,
+    DOMAIN,
+    MODE_CLOUD,
+    MODE_LOCAL,
+)
 from .coordinator import FlowResult, InventoryCoordinator
+from .sweep import SweepCoordinator
 
 
 @dataclass(slots=True)
 class TapoOnboardRuntimeData:
     """Per-entry runtime state."""
 
-    client: CloudClient
-    coordinator: InventoryCoordinator
+    client: CloudClient | None
+    coordinator: InventoryCoordinator | SweepCoordinator
     password: str | None = None  # memory only
 
 
@@ -53,12 +62,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: TapoOnboardConfigEntry) 
         flow_results.pop(entry.unique_id or "", None)
 
     try:
-        ssl_ctx = await hass.async_add_executor_job(build_cloud_ssl_context)
-        client = CloudClient(
-            async_get_clientsession(hass),
-            ssl_context=ssl_ctx,
-            terminal_uuid=entry.data[CONF_TERMINAL_UUID],
-        )
+        client: CloudClient | None = None
         runtime: TapoOnboardRuntimeData
 
         def password() -> str | None:
@@ -67,14 +71,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: TapoOnboardConfigEntry) 
                 runtime.password = fresh
             return runtime.password
 
-        coordinator = InventoryCoordinator(
-            hass,
-            entry,
-            client,
-            password=password,
-            username=entry.data[CONF_USERNAME],
-            flow_result=flow_results.pop(entry.unique_id or "", None),
-        )
+        coordinator: InventoryCoordinator | SweepCoordinator
+        flow_result = flow_results.pop(entry.unique_id or "", None)
+        if entry.data.get(CONF_MODE, MODE_CLOUD) == MODE_LOCAL:
+            coordinator = SweepCoordinator(
+                hass,
+                entry,
+                password=password,
+                username=entry.data[CONF_USERNAME],
+                flow_result=flow_result,
+            )
+            coordinator.async_start_lost_check()
+        else:
+            ssl_ctx = await hass.async_add_executor_job(build_cloud_ssl_context)
+            client = CloudClient(
+                async_get_clientsession(hass),
+                ssl_context=ssl_ctx,
+                terminal_uuid=entry.data[CONF_TERMINAL_UUID],
+            )
+            coordinator = InventoryCoordinator(
+                hass,
+                entry,
+                client,
+                password=password,
+                username=entry.data[CONF_USERNAME],
+                flow_result=flow_result,
+            )
     except BaseException:
         # Unload never runs for a failed setup, so the hand-off must not
         # outlive it in hass.data (rule 4: the password lives in memory only

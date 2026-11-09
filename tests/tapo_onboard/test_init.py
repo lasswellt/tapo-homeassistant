@@ -12,7 +12,7 @@ import ssl
 from collections.abc import Iterator
 from datetime import timedelta
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 from freezegun.api import FrozenDateTimeFactory
@@ -373,3 +373,156 @@ async def test_failed_setup_drops_password_handoff(hass: HomeAssistant) -> None:
         await hass.config_entries.async_setup(entry.entry_id)
     assert entry.state is ConfigEntryState.SETUP_ERROR
     assert EMAIL not in hass.data[DOMAIN][DATA_PENDING_PASSWORD]
+
+
+LOCAL_MAC = "AA:BB:CC:DD:EE:01"
+LOCAL_IP = "10.0.0.77"
+LOST_HOST = "192.168.1.5"
+
+
+def _local_entry(hass: HomeAssistant) -> MockConfigEntry:
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=EMAIL,
+        data={
+            "username": EMAIL,
+            "mode": "local",
+            "subnets": ["10.0.0.0/24"],
+            "ignored_macs": [],
+        },
+    )
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {}).setdefault(DATA_PENDING_PASSWORD, {})[EMAIL] = (
+        "pw-secret"
+    )
+    return entry
+
+
+def _local_info() -> TdpInfo:
+    info = TdpInfo.from_result(
+        {
+            "device_id": "DEVHASH",
+            "owner": hashlib.md5(EMAIL.encode()).hexdigest().upper(),  # noqa: S324
+            "mac": LOCAL_MAC,
+            "ip": LOCAL_IP,
+            "device_model": "P110(EU)",
+            "mgt_encrypt_schm": {"encrypt_type": "KLAP"},
+        }
+    )
+    assert info is not None
+    return info
+
+
+class _Sweep:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, ...]] = []
+        self.fail = False
+        self.replies: list[TdpInfo] = []
+
+    async def __call__(self, networks: Any, **_: object) -> list[TdpInfo]:
+        self.calls.append(tuple(str(n) for n in networks))
+        if self.fail:
+            raise OSError("udp down")
+        return self.replies
+
+
+@pytest.fixture
+def local_env() -> Iterator[tuple[_Sweep, Mock]]:
+    sweep = _Sweep()
+    cloud = Mock(side_effect=AssertionError("CloudClient must not be built"))
+    ssl_job = Mock(side_effect=AssertionError("ssl context must not be built"))
+    with (
+        patch("custom_components.tapo_onboard.sweep.async_sweep", sweep),
+        patch("custom_components.tapo_onboard.CloudClient", cloud),
+        patch("custom_components.tapo_onboard.build_cloud_ssl_context", ssl_job),
+    ):
+        yield sweep, cloud
+
+
+async def test_local_setup_has_no_cloud_client(
+    hass: HomeAssistant, local_env: tuple[_Sweep, Mock]
+) -> None:
+    sweep, cloud = local_env
+    sweep.replies = [_local_info()]
+    entry = _local_entry(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.LOADED
+    assert entry.runtime_data.client is None
+    assert type(entry.runtime_data.coordinator).__name__ == "SweepCoordinator"
+    cloud.assert_not_called()
+    assert entry.runtime_data.password == "pw-secret"
+    assert EMAIL not in hass.data[DOMAIN][DATA_PENDING_PASSWORD]
+    assert sweep.calls == [("10.0.0.0/24",)]
+
+
+async def test_local_sweep_failure_keeps_entry_loaded(
+    hass: HomeAssistant, local_env: tuple[_Sweep, Mock]
+) -> None:
+    sweep, _ = local_env
+    sweep.fail = True
+    entry = _local_entry(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.LOADED
+    assert not entry.runtime_data.coordinator.last_update_success
+
+
+async def test_local_unload_drops_password(
+    hass: HomeAssistant, local_env: tuple[_Sweep, Mock]
+) -> None:
+    entry = _local_entry(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    runtime = entry.runtime_data
+    runtime.password = "pw-secret"
+    hass.data[DOMAIN][DATA_PENDING_PASSWORD][EMAIL] = "again"
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    assert entry.state is ConfigEntryState.NOT_LOADED
+    assert runtime.password is None
+    assert EMAIL not in hass.data[DOMAIN][DATA_PENDING_PASSWORD]
+
+
+async def test_local_lost_check_registered(
+    hass: HomeAssistant, local_env: tuple[_Sweep, Mock]
+) -> None:
+    sweep, _ = local_env
+    MockConfigEntry(
+        domain="tplink",
+        unique_id=STUB_MAC,
+        data={"host": LOST_HOST},
+        state=ConfigEntryState.SETUP_RETRY,
+    ).add_to_hass(hass)
+    entry = _local_entry(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    onboarding = importlib.import_module("custom_components.tapo_onboard.onboarding")
+    await onboarding.async_get_tdp_query(hass)
+    sweep.calls.clear()
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=61))
+    await hass.async_block_till_done()
+    assert ("192.168.1.0/24",) in sweep.calls
+
+
+async def test_local_diagnostics_redacted(
+    hass: HomeAssistant, local_env: tuple[_Sweep, Mock]
+) -> None:
+    sweep, _ = local_env
+    info = _local_info()
+    sweep.replies = [info]
+    entry = _local_entry(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    diag = await async_get_config_entry_diagnostics(hass, entry)
+    dumped = json.dumps(diag)
+    for secret in (EMAIL, LOCAL_IP, LOCAL_MAC, "pw-secret"):
+        assert secret not in dumped
+    assert diag["mode"] == "local"
+    assert diag["entry"]["subnets"] == ["10.0.0.0/24"]
+    assert diag["coordinator"]["last_update_success"] is True
+    assert diag["sweep"]["count"] == 1
+    assert diag["sweep"]["by_model"] == {"P110(EU)": 1}
+    assert diag["sweep"]["by_encrypt_type"] == {"KLAP": 1}
+    assert diag["sweep"]["tpap"] == 0
+    assert diag["sweep"]["foreign"] == 0
+    assert diag["sweep"]["devices"][0]["device_model"] == "P110(EU)"
