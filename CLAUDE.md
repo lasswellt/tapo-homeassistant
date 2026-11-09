@@ -1,7 +1,8 @@
 # CLAUDE.md — tapolink
 
 Home Assistant custom integration (HACS) for TP-Link **SMART-protocol** devices
-(Tapo + current Kasa). **Cloud for discovery, LAN for control.** Domain: `tapolink`.
+(Tapo + current Kasa). **LAN sweep for discovery (cloud is optional), LAN for
+control.** Domain: `tapolink`.
 
 Two deliverables (`docs/ARCHITECTURE.md` §2):
 - **`tapolink-proto`** — our own async protocol library on PyPI (cloud client, TDP,
@@ -14,6 +15,21 @@ Read `docs/ARCHITECTURE.md` (revision 2) before changing anything, and
 ---
 
 ## The one-line premise
+
+A bounded **unicast TDP sweep** of the user's IoT subnets finds every owned device,
+its LAN IP and its protocol in about 1.5 s per `/24`, across VLANs, with no cloud call
+and no credentials (`tapolink_proto.discovery.async_sweep`, RESEARCH §11.9). Replies
+are filtered by `owner` = MD5(account email), so credentials only ever go to the
+user's own devices. **The cloud is optional** (concept v4,
+`docs/research/2026-11-08_concept-v4.md`, owner decisions D1–D3 accepted 2026-11-08):
+it bootstraps unknown subnets, supplies names, offline and shared devices, and is the
+fallback when UDP 20002 is blocked. Phases 1–5 of ARCHITECTURE §13 (own transports)
+are frozen behind gate G1–G3 (concept v4 §3.6).
+
+`async_sweep` only accepts private IPv4 ranges, prefix `/20` or narrower, at most 4096
+hosts in total (`parse_networks`), and never broadcasts.
+
+### Cloud mode (optional)
 
 The TP-Link cloud knows each device's **LAN IP address**. The IoT API
 `GET https://<rc>-app-server.iot.i.tplinknbu.com/v1/things/<deviceId>/details` returns
@@ -49,7 +65,8 @@ state: both said "offline" for working devices.
      `protocol/` and `device/` verifies provenance headers. A missing header is a
      blocking finding.
    - Our own licence is **Apache-2.0** (library and integration).
-3. **Cloud call budget per account entry:** one login per setup/reauth, one refresh per
+3. **Cloud call budget per cloud-mode account entry** (local-mode entries make no
+   cloud calls at all): one login per setup/reauth, one refresh per
    `-20651`, one `list_devices` every 30 min (fixed, not a user option), plus at most
    one early `list_devices` after a working device is lost, plus one `device_details`
    (IoT API) per device only when it needs an address (setup, new MAC, lost device
@@ -93,8 +110,11 @@ Built now (phase 1a, see ARCHITECTURE §13): the monorepo holds the helper and t
 cloud-only library. The full `tapolink` integration below is still a plan.
 
 ```
-packages/tapolink-proto/             # built: cloud/{signing,tls,models,errors,client}.py
-custom_components/tapo_onboard/      # built: config_flow, onboarding, coordinator,
+packages/tapolink-proto/             # built: cloud/{signing,tls,models,errors,client}.py,
+                                     # discovery/{tdp,sweep}.py (0.2.0: async_sweep)
+custom_components/tapo_onboard/      # built: config_flow (menu: local | cloud),
+                                     # sweep (SweepCoordinator, local mode),
+                                     # coordinator (cloud mode), onboarding,
                                      # diagnostics, quality_scale.yaml
 tools/check_core_tplink_contract.sh  # drift check vs core tplink
 ```
@@ -223,6 +243,12 @@ payload = b'{"params":{"rsa_key":"<PEM 2048 public>"}}'
 packet[12:16] = crc32(packet).to_bytes(4, "big")
 # UDP -> host:20002, strip 16-byte header from response, parse JSON
 ```
+
+Sweep = this probe to every host of the validated subnets under a semaphore
+(`async_sweep`, default concurrency 64, timeout 1.5 s). Local mode runs it every 15
+min, plus a targeted re-probe of a lost `tplink` entry's `/24` (at most once a minute
+per subnet). A reply with `encrypt_type` TPAP (or a `tpap` block) raises the
+`tpap_firmware_detected` repair.
 
 Response `result` gives: `device_id owner device_type device_model ip mac
 mgt_encrypt_schm{encrypt_type http_port is_support_https lv} tpap{pake port tls

@@ -1,12 +1,12 @@
 # tapolink — Tapo for Home Assistant, without the IP addresses
 
 A Home Assistant custom integration for TP-Link Tapo (and current Kasa) devices that
-uses the TP-Link cloud **for discovery only** and controls every device **locally
-over the LAN**.
+finds your devices **by probing your IoT subnets directly** (the TP-Link cloud is an
+optional fallback) and controls every device **locally over the LAN**.
 
-Sign in once with your Tapo account. Tick the devices you want. Done. No IP
-addresses, no DHCP reservations, and it works when your IoT devices are on a
-different VLAN from Home Assistant.
+Enter your Tapo account email and the subnet your devices are on. Tick the devices
+you want. Done. No IP addresses, no DHCP reservations, and it works when your IoT
+devices are on a different VLAN from Home Assistant.
 
 You sign in once. After that, new devices on your Tapo account are added
 automatically. Any device you untick stays out until you add it back.
@@ -28,7 +28,7 @@ Control never goes through the cloud.
 | Cross-subnet discovery | No | Yes |
 | New devices | Discovered on the same subnet only | Added automatically from your account |
 | Control path | Local | Local |
-| Cloud usage | None | Device list only, every 30 min |
+| Cloud usage | None | None in local mode; device list every 30 min in cloud mode |
 | Plugs on firmware 1.4.x (TPAP login) | Upstream support pending | Required before the first public release |
 | Device scope | Tapo, Kasa (incl. legacy) | Tapo + current Kasa; first release: plugs, power strips, bulbs, light strips, wall switches and dimmers |
 | Moving between the two | — | Guided; see "Moving from TP-Link Smart Home" below |
@@ -46,8 +46,37 @@ Both are Apache-2.0 licensed and contain no GPL code.
 ## tapo_onboard: use it today with TP-Link Smart Home
 
 `custom_components/tapo_onboard` ("Tapo Cloud Onboarding for TP-Link Smart Home",
-domain `tapo_onboard`) is a small helper, not a replacement. The cloud finds the IPs;
-Home Assistant's core `tplink` integration controls the devices.
+domain `tapo_onboard`) is a small helper, not a replacement. It finds the IPs; Home
+Assistant's core `tplink` integration controls the devices. It has two modes, picked
+from a menu when you add it.
+
+### Local mode (recommended, no cloud)
+
+Local mode finds your devices by probing your IoT subnets directly (one unicast TDP
+packet per address on UDP 20002) and never contacts TP-Link's cloud.
+
+- **You enter:** your TP-Link account email, its password, and the subnets your
+  devices live on. The subnets are pre-filled from the `/24` of every existing TP-Link
+  Smart Home device and Home Assistant's own networks. Only private IPv4 ranges, `/20`
+  or narrower, at most 4096 addresses in total.
+- **Your devices only:** each device's reply carries an owner hash (MD5 of the account
+  email). Devices owned by another account are never offered and never receive your
+  credentials.
+- **Upkeep:** a full sweep every 15 minutes (the same interval as core's own discovery)
+  onboards new devices. When a TP-Link Smart Home entry goes unavailable, its `/24` is
+  re-probed within about a minute and, if the device answers at a new IP, core's DHCP
+  flow updates the host.
+- **TPAP warning:** if one of your devices starts advertising TP-Link's newer TPAP
+  login, a repair tells you which ones and how to turn on Third-Party Compatibility.
+- **Stored:** email, subnets and ignored devices. No cloud token. The password is held
+  in memory only.
+- **Firewall:** Home Assistant must reach UDP 20002 on the IoT subnets. On the
+  maintainer's network one sweep of a `/24` takes about 1.5 s. If UDP is blocked
+  between the VLANs, local mode finds nothing; use cloud mode instead.
+- **Shared devices** (shared to you from another account) carry the sharer's owner
+  hash, so local mode skips them; use cloud mode for those.
+
+### Cloud mode
 
 - Logs in to the TP-Link cloud (with MFA if enabled) and lists your devices with
   their LAN IPs.
@@ -70,7 +99,9 @@ release into your `custom_components/` directory. Home Assistant installs the
 
 1. Settings > Devices & services > Add integration > "Tapo Cloud Onboarding for
    TP-Link Smart Home".
-2. Enter your TP-Link account email and password; enter the MFA code if asked.
+2. Pick **Find devices on my network** (local mode: email, password, subnets) or
+   **Use my TP-Link cloud account** (cloud mode: email and password, then the MFA code
+   if asked).
 3. Tick the devices to onboard. Each is labelled: ready / works partly in TP-Link
    Smart Home / not supported by TP-Link Smart Home / already in TP-Link Smart Home.
    Only "ready" devices start ticked.
@@ -85,10 +116,10 @@ release into your `custom_components/` directory. Home Assistant installs the
 | L730-6 bulb | Partial: a switch plus two child lights ("Down Light", "Ring Light"); also Matter-capable |
 | S310D | Not supported by core (BLE-mesh companion switch with no on/off); labelled and left unticked |
 
-**Stored:** the refresh token and terminal UUID only. The password is never stored;
-it is held in memory during setup.
+**Stored (cloud mode):** the refresh token and terminal UUID only. The password is
+never stored; it is held in memory during setup.
 
-**IP upkeep:** the 30-minute poll calls `device_details` only for lost `tplink`
+**IP upkeep (cloud mode):** the 30-minute poll calls `device_details` only for lost `tplink`
 entries and for new devices, at most once per device per 15 minutes. An entry is lost
 when it is in setup retry/error, or when it is loaded and every enabled entity is
 unavailable (the device moved or is off). If the cloud reports a different IP and the
