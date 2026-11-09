@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Provenance: original
-#   (docs/research/2026-11-01_core-tplink-onboarding-helper.md)
+#   (docs/research/2026-11-01_core-tplink-onboarding-helper.md,
+#   docs/research/2026-11-08_concept-v4.md)
 """Bridge that hands Tapo devices to core's `tplink` config flow."""
 
 from __future__ import annotations
@@ -52,14 +53,30 @@ async def async_get_tdp_query(hass: HomeAssistant) -> bytes:
     return query
 
 
+def _require_one_claim(device_id: str | None, owner_email: str | None) -> None:
+    """Reject calls that give neither or both identity claims."""
+    if (device_id is None) == (owner_email is None):
+        raise ValueError("exactly one of device_id and owner_email is required")
+
+
 async def async_verify_identity(
-    hass: HomeAssistant, *, host: str, mac: str, device_id: str
+    hass: HomeAssistant,
+    *,
+    host: str,
+    mac: str,
+    device_id: str | None = None,
+    owner_email: str | None = None,
 ) -> IdentityResult:
-    """Probe `host` and compare its TDP identity with the cloud's claim.
+    """Probe `host` and compare its TDP identity with one claim.
+
+    The claim is either a cloud `device_id` (TDP device_id == MD5 of it) or the
+    account `owner_email` (TDP owner == MD5 of it); the MAC must match in both
+    cases. Exactly one claim is required, otherwise ValueError.
 
     Must pass before any credential or stored credential hash reaches `host`.
     A probe that fails unexpectedly counts as NO_REPLY: the host stays unverified.
     """
+    _require_one_claim(device_id, owner_email)
     try:
         info = await async_probe(host, query=await async_get_tdp_query(hass))
     except Exception as exc:  # noqa: BLE001 - one host must not stop the caller
@@ -67,7 +84,10 @@ async def async_verify_identity(
         return IdentityResult.NO_REPLY
     if info is None:
         return IdentityResult.NO_REPLY
-    if info.matches_cloud_device(device_id) and info.matches_mac(mac):
+    claim_ok = (device_id is not None and info.matches_cloud_device(device_id)) or (
+        owner_email is not None and info.owned_by(owner_email)
+    )
+    if claim_ok and info.matches_mac(mac):
         return IdentityResult.VERIFIED
     LOGGER.debug("identity mismatch for device with MAC %s", mac)
     return IdentityResult.MISMATCH
@@ -89,7 +109,12 @@ def async_request_host_update(hass: HomeAssistant, *, host: str, mac: str) -> No
 
 
 async def async_hand_off_if_verified(
-    hass: HomeAssistant, *, host: str, mac: str, device_id: str
+    hass: HomeAssistant,
+    *,
+    host: str,
+    mac: str,
+    device_id: str | None = None,
+    owner_email: str | None = None,
 ) -> IdentityResult:
     """Start core's DHCP flow for `host` only once it proves the identity.
 
@@ -97,7 +122,7 @@ async def async_hand_off_if_verified(
     a MISMATCH or NO_REPLY host.
     """
     identity = await async_verify_identity(
-        hass, host=host, mac=mac, device_id=device_id
+        hass, host=host, mac=mac, device_id=device_id, owner_email=owner_email
     )
     if identity is IdentityResult.VERIFIED:
         async_request_host_update(hass, host=host, mac=mac)
@@ -119,17 +144,18 @@ async def async_onboard_device(
     *,
     host: str,
     mac: str,
-    device_id: str,
+    device_id: str | None = None,
+    owner_email: str | None = None,
     username: str,
     password: str,
 ) -> OnboardOutcome:
     """Drive core's `tplink` user flow for a verified `host`.
 
-    Credentials are only sent once the host proved the cloud-reported identity.
+    Credentials are only sent once the host proved the claimed identity.
     A silent host (TDP NO_REPLY) is CANNOT_CONNECT: retryable, no flow started.
     """
     identity = await async_verify_identity(
-        hass, host=host, mac=mac, device_id=device_id
+        hass, host=host, mac=mac, device_id=device_id, owner_email=owner_email
     )
     if identity is IdentityResult.MISMATCH:
         return OnboardOutcome.IDENTITY_MISMATCH

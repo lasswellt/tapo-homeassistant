@@ -221,3 +221,116 @@ async def test_tdp_query_built_once(hass: HomeAssistant, onb: ModuleType) -> Non
         assert await onb.async_get_tdp_query(hass) == b"query"
         assert await onb.async_get_tdp_query(hass) == b"query"
     assert len(calls) == 1
+
+
+OWNER = "Me@Example.com"
+
+
+def _owned(email: str, mac: str = STUB_MAC) -> TdpInfo:
+    info = TdpInfo.from_result(
+        {
+            "device_id": "UNRELATED",
+            "mac": mac,
+            "owner": hashlib.md5(email.encode()).hexdigest().upper(),  # noqa: S324
+        }
+    )
+    assert info is not None
+    return info
+
+
+async def _verify_owner(
+    onb: ModuleType, hass: HomeAssistant, email: str = OWNER
+) -> object:
+    return await onb.async_verify_identity(
+        hass, host=HOST, mac=STUB_MAC, owner_email=email
+    )
+
+
+async def test_verify_owner_email(hass: HomeAssistant, onb: ModuleType) -> None:
+    with _probe_returns(_owned(OWNER)):
+        assert await _verify_owner(onb, hass) is onb.IdentityResult.VERIFIED
+    with _probe_returns(_owned(OWNER.lower())):
+        assert await _verify_owner(onb, hass) is onb.IdentityResult.VERIFIED
+    with _probe_returns(_owned("other@example.com")):
+        assert await _verify_owner(onb, hass) is onb.IdentityResult.MISMATCH
+    with _probe_returns(_owned(OWNER, mac="11:22:33:44:55:66")):
+        assert await _verify_owner(onb, hass) is onb.IdentityResult.MISMATCH
+    with _probe_returns(None):
+        assert await _verify_owner(onb, hass) is onb.IdentityResult.NO_REPLY
+
+
+async def test_onboard_owner_email_added(
+    hass: HomeAssistant, onb: ModuleType, stub: type[StubTplinkFlow]
+) -> None:
+    with _probe_returns(_owned(OWNER)):
+        outcome = await onb.async_onboard_device(
+            hass,
+            host=HOST,
+            mac=STUB_MAC,
+            owner_email=OWNER,
+            username="u@example.com",
+            password="secret",
+        )
+    assert outcome is onb.OnboardOutcome.ADDED
+    assert len(hass.config_entries.async_entries("tplink")) == 1
+
+
+async def test_onboard_owner_mismatch_sends_nothing(
+    hass: HomeAssistant, onb: ModuleType, stub: type[StubTplinkFlow]
+) -> None:
+    stub.connect_result = "auth"
+    with _probe_returns(_owned("other@example.com")):
+        outcome = await onb.async_onboard_device(
+            hass,
+            host=HOST,
+            mac=STUB_MAC,
+            owner_email=OWNER,
+            username="u@example.com",
+            password="secret",
+        )
+    assert outcome is onb.OnboardOutcome.IDENTITY_MISMATCH
+    await hass.async_block_till_done()
+    assert hass.config_entries.flow.async_progress_by_handler("tplink") == []
+    assert hass.config_entries.async_entries("tplink") == []
+    assert stub.dhcp_infos == []
+
+
+async def test_hand_off_owner_email_starts_dhcp_flow(
+    hass: HomeAssistant, onb: ModuleType, stub: type[StubTplinkFlow]
+) -> None:
+    with _probe_returns(_owned(OWNER)):
+        result = await onb.async_hand_off_if_verified(
+            hass, host=HOST, mac=STUB_MAC, owner_email=OWNER
+        )
+    assert result is onb.IdentityResult.VERIFIED
+    await hass.async_block_till_done()
+    assert len(stub.dhcp_infos) == 1
+
+
+async def test_hand_off_owner_mismatch_starts_nothing(
+    hass: HomeAssistant, onb: ModuleType, stub: type[StubTplinkFlow]
+) -> None:
+    with _probe_returns(_owned("other@example.com")):
+        result = await onb.async_hand_off_if_verified(
+            hass, host=HOST, mac=STUB_MAC, owner_email=OWNER
+        )
+    assert result is onb.IdentityResult.MISMATCH
+    await hass.async_block_till_done()
+    assert stub.dhcp_infos == []
+
+
+async def test_claim_arguments_exactly_one(
+    hass: HomeAssistant, onb: ModuleType
+) -> None:
+    with pytest.raises(ValueError, match="exactly one"):
+        await onb.async_verify_identity(hass, host=HOST, mac=STUB_MAC)
+    with pytest.raises(ValueError, match="exactly one"):
+        await onb.async_verify_identity(
+            hass, host=HOST, mac=STUB_MAC, device_id=CLOUD_ID, owner_email=OWNER
+        )
+    with pytest.raises(ValueError, match="exactly one"):
+        await onb.async_hand_off_if_verified(hass, host=HOST, mac=STUB_MAC)
+    with pytest.raises(ValueError, match="exactly one"):
+        await onb.async_onboard_device(
+            hass, host=HOST, mac=STUB_MAC, username="u", password="p"
+        )
