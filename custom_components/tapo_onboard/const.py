@@ -12,6 +12,10 @@ DOMAIN: Final = "tapo_onboard"
 TPLINK_DOMAIN: Final = "tplink"
 
 INVENTORY_INTERVAL: Final = timedelta(minutes=30)
+# Local mode: fixed sweep cadence (matches core tplink's discovery interval) and
+# the cadence of the cheap lost-entry check.
+SWEEP_INTERVAL: Final = timedelta(minutes=15)
+LOST_CHECK_INTERVAL: Final = timedelta(seconds=60)
 # Minimum gap between two device_details calls for one device (rule 3).
 DETAILS_FLOOR: Final = timedelta(minutes=15)
 # Repeated failed lookups for one device double the gap from DETAILS_FLOOR up to
@@ -23,6 +27,10 @@ CONF_TOKEN: Final = "token"
 CONF_REFRESH_TOKEN: Final = "refresh_token"
 CONF_ACCOUNT_ID: Final = "account_id"
 CONF_IGNORED_MACS: Final = "ignored_macs"
+CONF_MODE: Final = "mode"
+MODE_LOCAL: Final = "local"
+MODE_CLOUD: Final = "cloud"
+CONF_SUBNETS: Final = "subnets"  # list[str] of CIDRs
 
 # hass.data key for the in-memory password handoff from the flow to setup.
 DATA_PENDING_PASSWORD: Final = "pending_password"
