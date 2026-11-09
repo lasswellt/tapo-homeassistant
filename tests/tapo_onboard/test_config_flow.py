@@ -683,3 +683,160 @@ async def test_local_subnet_errors(hass: HomeAssistant, subnets: str, key: str) 
     assert result["type"] == FlowResultType.FORM
     assert result["step_id"] == "local"
     assert result["errors"] == {"subnets": key}
+
+
+PREFILL_ADAPTERS = [
+    {"enabled": True, "ipv4": [{"address": "10.0.0.2", "network_prefix": 24}]},
+    {"enabled": True, "ipv4": [{"address": "10.0.0.9", "network_prefix": 24}]},
+    {"enabled": False, "ipv4": [{"address": "192.168.7.2", "network_prefix": 24}]},
+    {"enabled": True, "ipv4": [{"address": "127.0.0.1", "network_prefix": 8}]},
+    {"enabled": True, "ipv4": [{"address": "169.254.1.5", "network_prefix": 16}]},
+    {"enabled": True, "ipv4": [{"address": "8.8.8.8", "network_prefix": 24}]},
+]
+
+
+async def test_local_prefill_from_tplink_hosts_and_adapters(
+    hass: HomeAssistant,
+) -> None:
+    MockConfigEntry(
+        domain="tplink", unique_id="aa:bb:cc:00:00:01", data={"host": "not-an-ip"}
+    ).add_to_hass(hass)
+    MockConfigEntry(
+        domain="tplink", unique_id="aa:bb:cc:00:00:02", data={"host": "192.168.9.4"}
+    ).add_to_hass(hass)
+    with patch(
+        "homeassistant.components.network.async_get_adapters",
+        return_value=PREFILL_ADAPTERS,
+    ):
+        result = await _local_form(hass)
+    schema = cast("vol.Schema", result["data_schema"]).schema
+    key = next(k for k in schema if k == "subnets")
+    # tplink host first; invalid host, duplicate, disabled, loopback,
+    # link-local and public adapter addresses are all left out.
+    assert key.default() == "192.168.9.0/24, 10.0.0.0/24"
+
+
+async def _drive(hass: HomeAssistant, result: ConfigFlowResult) -> ConfigFlowResult:
+    while result["type"] == FlowResultType.SHOW_PROGRESS:
+        await hass.async_block_till_done()
+        result = await hass.config_entries.flow.async_configure(result["flow_id"])
+    return result
+
+
+async def _local_sweep(
+    hass: HomeAssistant, subnets: str = "10.0.0.0/24"
+) -> ConfigFlowResult:
+    """Start a local flow and submit the form; patches stay for the caller."""
+    result = await _local_form(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {"username": EMAIL, "password": PASSWORD, "subnets": subnets},
+    )
+    return await _drive(hass, result)
+
+
+def _patched(replies: list[TdpInfo] | type[BaseException]) -> tuple[object, ...]:
+    async def _sweep(networks: list[str], *, query: bytes) -> list[TdpInfo]:
+        if isinstance(replies, type):
+            raise replies()
+        return list(replies)
+
+    return (
+        patch("homeassistant.components.network.async_get_adapters", return_value=[]),
+        patch("custom_components.tapo_onboard.config_flow.async_sweep", _sweep),
+        patch("custom_components.tapo_onboard.sweep.async_sweep", _sweep),
+    )
+
+
+async def test_local_only_foreign_and_ipless_replies_create_entry_without_pick(
+    hass: HomeAssistant,
+) -> None:
+    ipless = TdpInfo.from_result(
+        {
+            "device_id": "X",
+            "mac": MAC_UNSUP,
+            "owner": hashlib.md5(EMAIL.lower().encode()).hexdigest().upper(),  # noqa: S324
+        }
+    )
+    assert ipless is not None and ipless.ip is None
+    replies = [_tdp(MAC_PARTIAL, HOSTS[MAC_PARTIAL], "other@example.com"), ipless]
+    p1, p2, p3 = _patched(replies)
+    with p1, p2, p3:  # type: ignore[attr-defined]
+        result = await _local_sweep(hass)
+        await hass.async_block_till_done()
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    ph = result["description_placeholders"]
+    assert ph is not None
+    assert (ph["added"], ph["confirm"], ph["already"], ph["failed"]) == (
+        "0",
+        "0",
+        "0",
+        "0",
+    )
+    assert not hass.config_entries.async_entries("tplink")
+
+
+async def test_local_sweep_cancelled_creates_entry_without_pick(
+    hass: HomeAssistant,
+) -> None:
+    p1, p2, p3 = _patched(asyncio.CancelledError)
+    with p1, p2, p3:  # type: ignore[attr-defined]
+        result = await _local_sweep(hass)
+        await hass.async_block_till_done()
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert result["data"]["subnets"] == ["10.0.0.0/24"]
+
+
+async def test_local_pick_labels_defaults_outcomes_and_second_flow_aborts(
+    hass: HomeAssistant,
+) -> None:
+    MockConfigEntry(
+        domain="tplink", unique_id=format_mac(MAC_ALREADY), data={"host": "10.0.0.8"}
+    ).add_to_hass(hass)
+    replies = [
+        _tdp(STUB_MAC, HOSTS[STUB_MAC], EMAIL, "P110(US)"),
+        _tdp(MAC_PARTIAL, HOSTS[MAC_PARTIAL], EMAIL, "L730(US)"),
+        _tdp(MAC_UNSUP, HOSTS[MAC_UNSUP], EMAIL, "S310D(US)"),
+        _tdp(MAC_ALREADY, HOSTS[MAC_ALREADY], EMAIL, "P110(US)"),
+        _tdp("11:22:33:44:55:99", "10.0.0.50", "other@example.com"),
+    ]
+    p1, p2, p3 = _patched(replies)
+    with p1, p2, p3:  # type: ignore[attr-defined]
+        result = await _local_sweep(hass)
+        assert result["step_id"] == "pick_devices"
+        schema = cast("vol.Schema", result["data_schema"]).schema
+        key = next(k for k in schema if k == "devices")
+        labels = {o["value"]: o["label"] for o in schema[key].config["options"]}
+        assert labels == {
+            STUB_MAC: "P110(US) at 10.0.0.5 – ready",
+            MAC_PARTIAL: "L730(US) at 10.0.0.6 – works partly in TP-Link Smart Home",
+            MAC_UNSUP: "S310D(US) at 10.0.0.7 – not supported by TP-Link Smart Home",
+            MAC_ALREADY: "P110(US) at 10.0.0.8 – already in TP-Link Smart Home",
+        }
+        assert sorted(key.default()) == sorted([STUB_MAC, MAC_PARTIAL])
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"devices": [STUB_MAC, MAC_ALREADY]}
+        )
+        result = await _drive(hass, result)
+        await hass.async_block_till_done()
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+        assert result["description_placeholders"] == {
+            "added": "1",
+            "confirm": "0",
+            "already": "1",
+            "failed": "0",
+            "failed_devices": "",
+        }
+        data = dict(result["data"])
+        assert data["mode"] == "local"
+        assert data["subnets"] == ["10.0.0.0/24"]
+        assert data["ignored_macs"] == sorted([MAC_PARTIAL, MAC_UNSUP])
+        assert not {"token", "refresh_token", "terminal_uuid", "password"} & set(data)
+        # Second local flow for the same account is refused.
+        again = await _local_form(hass)
+        again = await hass.config_entries.flow.async_configure(
+            again["flow_id"],
+            {"username": EMAIL, "password": PASSWORD, "subnets": "10.0.0.0/24"},
+        )
+    assert again["type"] == FlowResultType.ABORT
+    assert again["reason"] == "already_configured"

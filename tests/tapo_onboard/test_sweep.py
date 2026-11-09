@@ -445,3 +445,187 @@ async def test_tpap_issue_deleted_on_unload(
     assert _issue(hass, entry) is not None
     await entry._async_process_on_unload(hass)
     assert _issue(hass, entry) is None
+
+
+def _unavailable_entity(
+    hass: HomeAssistant, tp: MockConfigEntry, uid: str, state: str | None
+) -> None:
+    ent = er.async_get(hass).async_get_or_create(
+        "switch", "tplink", uid, config_entry=tp
+    )
+    if state is not None:
+        hass.states.async_set(ent.entity_id, state)
+
+
+async def test_not_loaded_entry_is_not_lost(
+    hass: HomeAssistant, stub: type[StubTplinkFlow], udp: FakeSweep
+) -> None:
+    tp = _tplink(hass, ConfigEntryState.NOT_LOADED)
+    udp.replies = [_info(ip="192.168.1.9")]
+    coord = _coord(hass, _entry(hass))
+    await coord.async_refresh()
+    await hass.async_block_till_done()
+    assert coord.data.host_updates == ()
+    assert tp.data["host"] == "192.168.1.1"
+
+
+async def test_loaded_entry_all_entities_unavailable_is_lost(
+    hass: HomeAssistant, stub: type[StubTplinkFlow], udp: FakeSweep
+) -> None:
+    tp = _tplink(hass, ConfigEntryState.LOADED)
+    _unavailable_entity(hass, tp, "a", STATE_UNAVAILABLE)
+    _unavailable_entity(hass, tp, "b", STATE_UNAVAILABLE)
+    udp.replies = [_info(ip="192.168.1.9")]
+    coord = _coord(hass, _entry(hass))
+    await coord.async_refresh()
+    await hass.async_block_till_done()
+    assert coord.data.host_updates == (STUB_MAC,)
+    assert tp.data["host"] == "192.168.1.9"
+
+
+@pytest.mark.parametrize("other_state", ["on", None])
+async def test_loaded_entry_with_a_live_or_stateless_entity_is_not_lost(
+    hass: HomeAssistant,
+    stub: type[StubTplinkFlow],
+    udp: FakeSweep,
+    other_state: str | None,
+) -> None:
+    tp = _tplink(hass, ConfigEntryState.LOADED)
+    _unavailable_entity(hass, tp, "a", STATE_UNAVAILABLE)
+    _unavailable_entity(hass, tp, "b", other_state)
+    udp.replies = [_info(ip="192.168.1.9")]
+    coord = _coord(hass, _entry(hass))
+    await coord.async_refresh()
+    await hass.async_block_till_done()
+    assert coord.data.host_updates == ()
+    assert tp.data["host"] == "192.168.1.1"
+
+
+async def test_networks_skip_tplink_entries_without_usable_host(
+    hass: HomeAssistant, stub: type[StubTplinkFlow], udp: FakeSweep
+) -> None:
+    MockConfigEntry(
+        domain="tplink", unique_id="aa:bb:cc:00:00:01", data={}
+    ).add_to_hass(hass)
+    MockConfigEntry(
+        domain="tplink", unique_id="aa:bb:cc:00:00:02", data={"host": "not-an-ip"}
+    ).add_to_hass(hass)
+    coord = _coord(hass, _entry(hass))
+    assert [str(n) for n in coord.sweep_networks()] == ["192.168.1.0/24"]
+
+
+async def test_networks_union_too_big_uses_stored_subnets(
+    hass: HomeAssistant, stub: type[StubTplinkFlow], udp: FakeSweep
+) -> None:
+    _tplink(hass, ConfigEntryState.LOADED, host="10.0.5.7")
+    coord = _coord(hass, _entry(hass, subnets=["172.16.0.0/16", "172.17.0.0/16"]))
+    # Stored alone is already too big -> nothing to sweep.
+    assert coord.sweep_networks() == ()
+    coord = _coord(hass, _entry(hass, subnets=["172.16.0.0/20"]))
+    assert [str(n) for n in coord.sweep_networks()] == ["172.16.0.0/20"]
+
+
+async def test_invalid_stored_subnets_mean_no_sweep(
+    hass: HomeAssistant, stub: type[StubTplinkFlow], udp: FakeSweep
+) -> None:
+    coord = _coord(hass, _entry(hass, subnets=["8.8.8.0/24"]))
+    assert coord.sweep_networks() == ()
+    await coord.async_refresh()
+    assert coord.last_update_success
+    assert udp.calls == []
+
+
+async def test_lost_check_skips_entries_without_id_host_or_valid_ip(
+    hass: HomeAssistant, stub: type[StubTplinkFlow], udp: FakeSweep
+) -> None:
+    MockConfigEntry(
+        domain="tplink",
+        data={"host": "192.168.1.1"},
+        state=ConfigEntryState.SETUP_RETRY,
+    ).add_to_hass(hass)
+    MockConfigEntry(
+        domain="tplink",
+        unique_id="aa:bb:cc:00:00:01",
+        data={},
+        state=ConfigEntryState.SETUP_RETRY,
+    ).add_to_hass(hass)
+    MockConfigEntry(
+        domain="tplink",
+        unique_id="aa:bb:cc:00:00:02",
+        data={"host": "not-an-ip"},
+        state=ConfigEntryState.SETUP_RETRY,
+    ).add_to_hass(hass)
+    coord = _coord(hass, _entry(hass))
+    await coord._async_check_lost()
+    assert udp.calls == []
+
+
+async def test_lost_check_sweep_failure_is_isolated_per_subnet(
+    hass: HomeAssistant, stub: type[StubTplinkFlow]
+) -> None:
+    first = _tplink(hass, ConfigEntryState.SETUP_RETRY, host="192.168.1.1")
+    second = MockConfigEntry(
+        domain="tplink",
+        unique_id=format_mac(MAC2),
+        data={"host": "10.0.5.7"},
+        state=ConfigEntryState.SETUP_RETRY,
+    )
+    second.add_to_hass(hass)
+    seen: list[str] = []
+
+    async def _sweep(networks: Any, *, query: bytes, **_: object) -> list[TdpInfo]:
+        net = str(next(iter(networks)))
+        seen.append(net)
+        if net == "192.168.1.0/24":
+            raise OSError("socket")
+        return [_info(MAC2, ip="10.0.5.9")]
+
+    async def _probe(host: str, *, query: bytes, **_: object) -> TdpInfo | None:
+        return _info(MAC2, host)
+
+    with (
+        patch("custom_components.tapo_onboard.sweep.async_sweep", _sweep),
+        patch("custom_components.tapo_onboard.onboarding.async_probe", _probe),
+    ):
+        coord = _coord(hass, _entry(hass))
+        await coord._async_check_lost()
+        await hass.async_block_till_done()
+    assert seen == ["192.168.1.0/24", "10.0.5.0/24"]
+    assert first.data["host"] == "192.168.1.1"
+    assert second.data["host"] == "10.0.5.9"
+
+
+async def test_onboarding_exception_counts_as_cannot_connect_and_retries(
+    hass: HomeAssistant, stub: type[StubTplinkFlow], udp: FakeSweep
+) -> None:
+    udp.replies = [_info()]
+    coord = _coord(hass, _entry(hass), "secret")
+    with patch.object(
+        hass.config_entries.flow, "async_init", side_effect=RuntimeError("boom")
+    ):
+        await coord.async_refresh()
+    assert coord.last_update_success
+    assert coord.data.outcomes[STUB_MAC].value == "cannot_connect"
+    assert hass.config_entries.async_entries("tplink") == []
+    # CANNOT_CONNECT is retryable: the next sweep onboards it.
+    await coord.async_refresh()
+    assert coord.data.outcomes[STUB_MAC].value == "added"
+
+
+async def test_no_password_silent_host_is_retried_next_sweep(
+    hass: HomeAssistant, stub: type[StubTplinkFlow], udp: FakeSweep
+) -> None:
+    udp.replies = [_info()]
+    coord = _coord(hass, _entry(hass))
+    silent = True
+
+    async def _probe(host: str, *, query: bytes, **_: object) -> TdpInfo | None:
+        return None if silent else _info(STUB_MAC, host)
+
+    with patch("custom_components.tapo_onboard.onboarding.async_probe", _probe):
+        await coord.async_refresh()
+        assert coord.data.outcomes == {}
+        silent = False
+        await coord.async_refresh()
+    await hass.async_block_till_done()
+    assert coord.data.outcomes[STUB_MAC].value == "handed_to_user"
