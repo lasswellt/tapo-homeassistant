@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import logging
 from collections.abc import Iterable
 from ipaddress import IPv4Address, IPv4Network
 from typing import Final, Literal
 
 from .tdp import TDP_PORT, TdpInfo, async_probe
+
+_LOGGER = logging.getLogger(__name__)
 
 MAX_SWEEP_HOSTS: Final = 4096
 MIN_PREFIX: Final = 20
@@ -89,7 +92,9 @@ async def async_sweep(
     """Unicast-probe every host in ``networks``; return devices ordered by probed IP.
 
     Hosts are probed in ascending address order, so the result is ordered by
-    probed IP. De-duplicated by MAC (first seen wins). Silent hosts dropped.
+    probed IP. De-duplicated by MAC (first seen wins). Silent hosts dropped, and
+    so is a reply whose ``ip`` is not the probed host: the payload is
+    unauthenticated, so callers may use ``info.ip`` as the address that answered.
 
     Raises:
         SweepRangeError: before any packet is sent, if a range is rejected.
@@ -99,7 +104,11 @@ async def async_sweep(
 
     async def probe(host: str) -> TdpInfo | None:
         async with semaphore:
-            return await async_probe(host, query=query, port=port, timeout=timeout)
+            info = await async_probe(host, query=query, port=port, timeout=timeout)
+        if info is not None and info.ip != host:
+            _LOGGER.debug("Dropped TDP reply from %s: ip field does not match", host)
+            return None
+        return info
 
     hosts = [str(h) for network in ranges for h in network.hosts()]
     found = await asyncio.gather(*(probe(h) for h in hosts))

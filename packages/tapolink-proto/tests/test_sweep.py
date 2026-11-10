@@ -171,6 +171,33 @@ async def test_sweep_dedup_silent_and_order(query: bytes) -> None:
     assert [i.ip for i in found] == ["127.0.0.2", "127.0.0.4"]
 
 
+@pytest.mark.parametrize("claimed", ["127.0.0.3", "8.8.8.8", None])
+async def test_sweep_drops_reply_with_foreign_ip(
+    query: bytes, claimed: str | None
+) -> None:
+    """A reply naming another address (or none) is not trusted as the host."""
+    port = await _free_port()
+    result = _result("AA-BB-CC-00-00-07", "127.0.0.2")
+    if claimed is None:
+        del result["ip"]
+    else:
+        result["ip"] = claimed
+    honest = _frame(_result("AA-BB-CC-00-00-08", "127.0.0.4"))
+    transports = [
+        await _bind("127.0.0.2", port, _frame(result)),
+        await _bind("127.0.0.4", port, honest),
+    ]
+    try:
+        found = await async_sweep(
+            ["127.0.0.2/31", "127.0.0.4/31"], query=query, port=port, timeout=0.3
+        )
+    finally:
+        for transport in transports:
+            assert transport is not None
+            transport.close()
+    assert [(i.mac, i.ip) for i in found] == [("aa:bb:cc:00:00:08", "127.0.0.4")]
+
+
 async def test_sweep_all_silent(query: bytes) -> None:
     port = await _free_port()
     found = await async_sweep(
