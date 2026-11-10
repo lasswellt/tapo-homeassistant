@@ -81,6 +81,7 @@
       "rate_limited": "Too many attempts. Try again in {minutes} minutes.",
       "unknown": "Unexpected error.",
       "invalid_code": "The code must be 6 digits.",
+      "password_rejected": "Two devices rejected this password, so setup stopped before trying the rest. Check the password of your TP-Link account and try again.",
       "sweep_failed": "The network sweep failed. Check the subnets and try again.",
       "invalid_subnets": "Enter one or more private IPv4 networks such as 192.168.1.0/24, separated by commas.",
       "not_private": "Only private networks (such as 192.168.1.0/24) can be searched.",

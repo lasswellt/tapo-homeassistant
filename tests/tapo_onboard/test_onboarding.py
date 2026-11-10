@@ -91,6 +91,24 @@ async def test_auth_failed_creates_dhcp_card(
     assert len(hass.config_entries.async_entries("tplink")) == 0
 
 
+async def test_auth_failed_without_host_update_starts_no_flow(
+    hass: HomeAssistant, onb: ModuleType, stub: type[StubTplinkFlow]
+) -> None:
+    stub.connect_result = "auth"
+    outcome = await onb.async_onboard_device(
+        hass,
+        host=HOST,
+        mac=STUB_MAC,
+        device_id=CLOUD_ID,
+        username="u@example.com",
+        password="wrong",
+        request_host_update=False,
+    )
+    assert outcome is onb.OnboardOutcome.AUTH_FAILED
+    await hass.async_block_till_done()
+    assert hass.config_entries.flow.async_progress_by_handler("tplink") == []
+
+
 async def test_cannot_connect(
     hass: HomeAssistant, onb: ModuleType, stub: type[StubTplinkFlow]
 ) -> None:

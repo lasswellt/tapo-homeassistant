@@ -73,6 +73,7 @@ from .onboarding import (
     OnboardOutcome,
     async_get_tdp_query,
     async_onboard_device,
+    async_request_host_update,
     async_tplink_entry_for_mac,
 )
 from .sweep import _model_base
@@ -91,6 +92,8 @@ _DISCOVERY_ABORTS = {
     OnboardOutcome.AUTH_FAILED: "auth_failed",
     OnboardOutcome.IDENTITY_MISMATCH: "identity_mismatch",
 }
+
+MAX_PASSWORD_REJECTIONS = 2
 
 CONF_CODE = "code"
 CONF_DEVICES = "devices"
@@ -151,6 +154,8 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
         self._reauth = False
         self._discovered: dict[str, str] = {}
         self._sweep_failed = False
+        self._password_rejected = False
+        self._stopped = False
 
     @staticmethod
     def _error(err: Exception) -> tuple[str, dict[str, str]]:
@@ -239,10 +244,14 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Ask for the account email, password and the subnets to look in."""
-        if user_input is None:
+        # A progress step that finished at once hands its own input on here.
+        if user_input is None or CONF_USERNAME not in user_input:
             if self._sweep_failed:
                 self._sweep_failed = False
                 return self._local_form({"base": "sweep_failed"})
+            if self._password_rejected:
+                self._password_rejected = False
+                return self._local_form({"base": "password_rejected"})
             self._subnets_text = ", ".join(await self._prefill_subnets())
             return self._local_form({})
         self._username = str(user_input[CONF_USERNAME]).strip()
@@ -558,6 +567,8 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
 
     async def _onboard_selected(self) -> None:
         cloud = {d.mac: d for d in self._devices}
+        rejected: list[tuple[str, str]] = []
+        added = False
         for device in self._candidates:
             if device.mac not in self._selected:
                 continue
@@ -579,7 +590,7 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
             if ip is None:
                 self._outcomes[device.mac] = OnboardOutcome.CANNOT_CONNECT
                 continue
-            self._outcomes[device.mac] = await async_onboard_device(
+            outcome = await async_onboard_device(
                 self.hass,
                 host=ip,
                 mac=device.mac,
@@ -587,7 +598,20 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
                 owner_email=self._username if device.device_id is None else None,
                 username=self._username,
                 password=self._password,
+                request_host_update=not self._local,
             )
+            self._outcomes[device.mac] = outcome
+            if outcome is OnboardOutcome.ADDED:
+                added = True
+            elif outcome is OnboardOutcome.AUTH_FAILED and self._local:
+                rejected.append((ip, device.mac))
+                if len(rejected) >= MAX_PASSWORD_REJECTIONS and not added:
+                    # Local mode never validated the password: stop rather
+                    # than risk a lockout with one failed login per device.
+                    self._stopped = True
+                    return
+        for host, mac in rejected:
+            async_request_host_update(self.hass, host=host, mac=mac)
 
     async def async_step_onboarding(
         self, user_input: dict[str, Any] | None = None
@@ -606,6 +630,16 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
             LOGGER.warning("Onboarding was cancelled")
         elif (err := task.exception()) is not None:
             LOGGER.error("Onboarding failed: %s", type(err).__name__)
+        if self._stopped:
+            self._stopped = False
+            self._password = ""
+            self._password_rejected = True
+            self._outcomes.clear()
+            self._details_at.clear()
+            self._selected = set()
+            self._ignored = []
+            self._candidates = []
+            return self.async_show_progress_done(next_step_id="local")
         for mac in self._selected:
             self._outcomes.setdefault(mac, OnboardOutcome.CANNOT_CONNECT)
         return self.async_show_progress_done(next_step_id="finish")

@@ -149,6 +149,7 @@ async def async_onboard_device(
     owner_email: str | None = None,
     username: str,
     password: str,
+    request_host_update: bool = True,
 ) -> OnboardOutcome:
     """Drive core's `tplink` user flow for a verified `host`.
 
@@ -185,7 +186,8 @@ async def async_onboard_device(
             result["step_id"] == "user_auth_confirm"
         ):
             flow.async_abort(result["flow_id"])
-            async_request_host_update(hass, host=host, mac=mac)
+            if request_host_update:
+                async_request_host_update(hass, host=host, mac=mac)
             return OnboardOutcome.AUTH_FAILED
 
     if result["type"] == FlowResultType.CREATE_ENTRY:

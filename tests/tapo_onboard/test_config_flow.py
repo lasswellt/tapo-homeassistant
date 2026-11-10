@@ -9,8 +9,9 @@ import asyncio
 import hashlib
 import ssl
 from collections.abc import Iterator
+from contextlib import contextmanager
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
@@ -1011,3 +1012,140 @@ async def test_discovery_mac_in_tplink_aborts(hass: HomeAssistant) -> None:
     result = await _discover(hass, entry.entry_id)
     assert result["type"] == FlowResultType.ABORT
     assert result["reason"] == "already_configured"
+
+
+async def _local_pick_run(
+    hass: HomeAssistant, macs: list[str]
+) -> tuple[ConfigFlowResult, dict[str, str]]:
+    """Sweep 3 owned devices, tick `macs`, return the final result and ids."""
+    replies = [
+        _tdp(STUB_MAC, HOSTS[STUB_MAC], EMAIL),
+        _tdp(MAC_PARTIAL, HOSTS[MAC_PARTIAL], EMAIL),
+        _tdp(MAC_UNSUP, HOSTS[MAC_UNSUP], EMAIL),
+    ]
+    p1, p2, p3 = _patched(replies)
+    with p1, p2, p3:  # type: ignore[attr-defined]
+        result = await _local_sweep(hass)
+        assert result["step_id"] == "pick_devices"
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"devices": macs}
+        )
+        result = await _drive(hass, result)
+        await hass.async_block_till_done()
+    return result, {}
+
+
+@contextmanager
+def _reject_hosts(hosts: set[str]) -> Iterator[None]:
+    """Make the stub tplink flow reject the password only for `hosts`."""
+    original = StubTplinkFlow.async_step_user_auth_confirm
+
+    async def _step(
+        self: StubTplinkFlow, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        if user_input is not None and self._host in hosts:
+            return self.async_show_form(
+                step_id="user_auth_confirm", errors={"password": "invalid_auth"}
+            )
+        return await original(self, user_input)
+
+    with patch.object(StubTplinkFlow, "async_step_user_auth_confirm", _step):
+        yield
+
+
+def _dhcp_hosts() -> list[str]:
+    return sorted(i.ip for i in StubTplinkFlow.dhcp_infos)
+
+
+async def test_local_two_rejections_stop_run_and_return_to_form(
+    hass: HomeAssistant,
+) -> None:
+    StubTplinkFlow.connect_result = "auth"
+    StubTplinkFlow.valid_password = "other"
+    attempted: list[str] = []
+    original = StubTplinkFlow.async_step_user
+
+    async def _spy(
+        self: StubTplinkFlow, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        if user_input is not None:
+            attempted.append(user_input["host"])
+        return await original(self, user_input)
+
+    with patch.object(StubTplinkFlow, "async_step_user", _spy):
+        result, _ = await _local_pick_run(hass, [STUB_MAC, MAC_PARTIAL, MAC_UNSUP])
+    assert attempted == [HOSTS[STUB_MAC], HOSTS[MAC_PARTIAL]]
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "local"
+    assert result["errors"] == {"base": "password_rejected"}
+    schema = cast("vol.Schema", result["data_schema"]).schema
+    defaults = {str(k): k.default() for k in schema if k.default is not vol.UNDEFINED}
+    assert defaults == {"username": EMAIL, "subnets": "10.0.0.0/24"}
+    assert not hass.config_entries.async_entries(DOMAIN)
+    assert not hass.config_entries.async_entries("tplink")
+    assert StubTplinkFlow.dhcp_infos == []
+    assert not hass.data.get(DOMAIN, {}).get(DATA_PENDING_PASSWORD)
+    # Retrying with the right password reaches the pick step again.
+    StubTplinkFlow.valid_password = PASSWORD
+    reply = _tdp(STUB_MAC, HOSTS[STUB_MAC], EMAIL)
+
+    async def _slow_sweep(networks: list[str], *, query: bytes) -> list[TdpInfo]:
+        await asyncio.sleep(0)  # not instant, as a real UDP sweep never is
+        return [reply]
+
+    with (
+        patch("homeassistant.components.network.async_get_adapters", return_value=[]),
+        patch("custom_components.tapo_onboard.config_flow.async_sweep", _slow_sweep),
+        patch("custom_components.tapo_onboard.sweep.async_sweep", _slow_sweep),
+    ):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {"username": EMAIL, "password": PASSWORD, "subnets": "10.0.0.0/24"},
+        )
+        result = await _drive(hass, result)
+        assert result["step_id"] == "pick_devices"
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"devices": [STUB_MAC]}
+        )
+        result = await _drive(hass, result)
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert result["description_placeholders"]["added"] == "1"  # type: ignore[index]
+
+
+async def test_local_added_then_two_rejections_runs_all_and_requests_updates(
+    hass: HomeAssistant,
+) -> None:
+    StubTplinkFlow.connect_result = "auth"
+    with _reject_hosts({HOSTS[MAC_PARTIAL], HOSTS[MAC_UNSUP]}):
+        result, _ = await _local_pick_run(hass, [STUB_MAC, MAC_PARTIAL, MAC_UNSUP])
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert result["description_placeholders"]["added"] == "1"  # type: ignore[index]
+    assert result["description_placeholders"]["confirm"] == "2"  # type: ignore[index]
+    assert _dhcp_hosts() == sorted([HOSTS[MAC_PARTIAL], HOSTS[MAC_UNSUP]])
+
+
+async def test_local_single_rejection_continues_and_requests_update(
+    hass: HomeAssistant,
+) -> None:
+    StubTplinkFlow.connect_result = "auth"
+    with _reject_hosts({HOSTS[STUB_MAC]}):
+        result, _ = await _local_pick_run(hass, [STUB_MAC, MAC_PARTIAL, MAC_UNSUP])
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    ph = result["description_placeholders"]
+    assert ph is not None
+    assert (ph["added"], ph["confirm"]) == ("2", "1")
+    assert _dhcp_hosts() == [HOSTS[STUB_MAC]]
+
+
+async def test_cloud_two_rejections_do_not_stop_run(hass: HomeAssistant) -> None:
+    StubTplinkFlow.connect_result = "auth"
+    with _reject_hosts({HOSTS[STUB_MAC], HOSTS[MAC_PARTIAL]}):
+        result = await _run(hass, [STUB_MAC, MAC_PARTIAL, MAC_UNSUP])
+    ph = result["description_placeholders"]
+    assert ph is not None
+    assert (ph["added"], ph["confirm"]) == ("1", "2")
+    assert [e.unique_id for e in hass.config_entries.async_entries("tplink")] == [
+        format_mac(MAC_UNSUP)
+    ]
+    # Cloud mode keeps the immediate host-update flow per rejected device.
+    assert _dhcp_hosts() == sorted([HOSTS[STUB_MAC], HOSTS[MAC_PARTIAL]])
