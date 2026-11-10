@@ -1189,6 +1189,120 @@ async def test_discovery_mac_in_tplink_aborts(hass: HomeAssistant) -> None:
     assert result["reason"] == "already_configured"
 
 
+async def _moved(
+    hass: HomeAssistant,
+    entry_id: str,
+    mac: str = STUB_MAC,
+    host: str = "10.0.0.5",
+) -> ConfigFlowResult:
+    return await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": SOURCE_INTEGRATION_DISCOVERY},
+        data={
+            "kind": "moved",
+            "host": host,
+            "mac": mac,
+            "model": "P110",
+            "entry_id": entry_id,
+        },
+    )
+
+
+def _lost_tplink(hass: HomeAssistant) -> MockConfigEntry:
+    tp = MockConfigEntry(
+        domain="tplink", unique_id=format_mac(STUB_MAC), data={"host": "10.0.0.4"}
+    )
+    tp.add_to_hass(hass)
+    return tp
+
+
+async def test_moved_card_asks_nothing_and_has_own_unique_id(
+    hass: HomeAssistant,
+) -> None:
+    entry = _account(hass)
+    _lost_tplink(hass)
+    result = await _moved(hass, entry.entry_id)
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "moved_confirm"
+    assert result["data_schema"] is None
+    assert result["description_placeholders"] == {"model": "P110", "host": "10.0.0.5"}
+    flow = hass.config_entries.flow.async_get(result["flow_id"])
+    assert flow is not None
+    assert flow["context"]["unique_id"] == f"moved-{format_mac(STUB_MAC)}"
+    assert flow["context"]["title_placeholders"] == {
+        "model": "P110",
+        "host": "10.0.0.5",
+    }
+    again = await _moved(hass, entry.entry_id)
+    assert again["type"] == FlowResultType.ABORT
+    assert again["reason"] == "already_in_progress"
+
+
+async def test_moved_card_not_blocked_by_ignored_new_device_card(
+    hass: HomeAssistant,
+) -> None:
+    entry = _account(hass)
+    _lost_tplink(hass)
+    MockConfigEntry(
+        domain=DOMAIN, unique_id=format_mac(STUB_MAC), source=SOURCE_IGNORE, data={}
+    ).add_to_hass(hass)
+    result = await _moved(hass, entry.entry_id)
+    assert result["type"] == FlowResultType.FORM
+
+
+async def test_moved_confirm_hands_off_to_tplink(hass: HomeAssistant) -> None:
+    entry = _account(hass)
+    tp = _lost_tplink(hass)
+    result = await _moved(hass, entry.entry_id)
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    await hass.async_block_till_done()
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "device_moved"
+    assert tp.data["host"] == "10.0.0.5"
+    assert [i.ip for i in StubTplinkFlow.dhcp_infos] == ["10.0.0.5"]
+
+
+@pytest.mark.parametrize(
+    ("host", "mismatch", "reason"),
+    [
+        ("10.0.0.5", True, "identity_mismatch"),
+        ("10.0.0.99", False, "cannot_connect"),
+    ],
+)
+async def test_moved_confirm_failure_reasons(
+    hass: HomeAssistant, host: str, mismatch: bool, reason: str
+) -> None:
+    entry = _account(hass)
+    _lost_tplink(hass)
+    if mismatch:
+        PROBE_AS[host] = MAC_PARTIAL
+    result = await _moved(hass, entry.entry_id, host=host)
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == reason
+    assert StubTplinkFlow.dhcp_infos == []
+
+
+async def test_moved_card_without_tplink_entry_aborts(hass: HomeAssistant) -> None:
+    entry = _account(hass)
+    result = await _moved(hass, entry.entry_id)
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+
+
+@pytest.mark.parametrize("case", ["missing", "unloaded"])
+async def test_moved_confirm_account_not_running_aborts(
+    hass: HomeAssistant, case: str
+) -> None:
+    entry = _account(hass, loaded=case != "unloaded")
+    _lost_tplink(hass)
+    result = await _moved(hass, "missing" if case == "missing" else entry.entry_id)
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "password_needed"
+    assert StubTplinkFlow.dhcp_infos == []
+
+
 async def _local_pick_run(
     hass: HomeAssistant, macs: list[str]
 ) -> tuple[ConfigFlowResult, dict[str, str]]:

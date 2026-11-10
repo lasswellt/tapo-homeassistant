@@ -140,6 +140,10 @@ class SweepCoordinator(DataUpdateCoordinator[SweepState]):
         )
         self._attempted: set[str] = set()
         self._last_targeted: dict[IPv4Network, datetime] = {}
+        # MAC -> login scheme the device showed while healthy at its known host.
+        self._schemes: dict[str, str | None] = {}
+        # MACs whose "moved" card was started in the current lost episode.
+        self._moved_cards: set[str] = set()
         if flow_result is not None:
             self._attempted.update(
                 mac for mac, o in flow_result.outcomes.items() if o in _TERMINAL
@@ -168,6 +172,61 @@ class SweepCoordinator(DataUpdateCoordinator[SweepState]):
             return ()
 
     @callback
+    def _record_scheme(self, info: TdpInfo) -> None:
+        """Remember the scheme of a healthy device answering at its known host."""
+        entry = async_tplink_entry_for_mac(self.hass, info.mac)
+        if (
+            entry is not None
+            and info.ip == entry.data.get("host")
+            and not is_lost(self.hass, entry)
+        ):
+            self._schemes[format_mac(info.mac)] = (
+                info.encrypt_type or ""
+            ).upper() or None
+
+    @callback
+    def _prune_moved_cards(self) -> None:
+        """Forget the card marker of every entry that is no longer lost."""
+        for mac in list(self._moved_cards):
+            entry = async_tplink_entry_for_mac(self.hass, mac)
+            if entry is None or not is_lost(self.hass, entry):
+                self._moved_cards.discard(mac)
+
+    async def _async_handle_moved(self, info: TdpInfo) -> bool:
+        """Re-point a lost entry whose device answers elsewhere.
+
+        Only KLAP is re-pointed unattended: the device must prove it knows the
+        credentials before the client sends anything sensitive. Any other
+        scheme (or an unknown one) sends the password at login, so the user
+        confirms through a card. Returns True when core's flow was started.
+        """
+        assert info.ip is not None  # noqa: S101 - filtered by the callers
+        mac = format_mac(info.mac)
+        if (
+            self._schemes.get(mac) == "KLAP"
+            and (info.encrypt_type or "").upper() == "KLAP"
+        ):
+            identity = await async_hand_off_if_verified(
+                self.hass, host=info.ip, mac=info.mac, owner_email=self._username
+            )
+            return identity is IdentityResult.VERIFIED
+        if mac not in self._moved_cards:
+            self._moved_cards.add(mac)
+            discovery_flow.async_create_flow(
+                self.hass,
+                DOMAIN,
+                {"source": SOURCE_INTEGRATION_DISCOVERY},
+                {
+                    "kind": "moved",
+                    "host": info.ip,
+                    "mac": info.mac,
+                    "model": _model_base(info.device_model) or "Tapo device",
+                    "entry_id": self._entry.entry_id,
+                },
+            )
+        return False
+
+    @callback
     def async_start_lost_check(self) -> None:
         """Check for lost `tplink` entries every `LOST_CHECK_INTERVAL`."""
         self._entry.async_on_unload(
@@ -178,6 +237,7 @@ class SweepCoordinator(DataUpdateCoordinator[SweepState]):
 
     async def _async_check_lost(self, _now: datetime | None = None) -> None:
         """Sweep the subnet of each lost `tplink` entry, at most once per floor."""
+        self._prune_moved_cards()
         by_subnet: dict[IPv4Network, list[tuple[str, str]]] = {}
         for tp in self.hass.config_entries.async_entries(TPLINK_DOMAIN):
             host = tp.data.get("host")
@@ -208,14 +268,10 @@ class SweepCoordinator(DataUpdateCoordinator[SweepState]):
                 for info in infos:
                     if not info.ip or not info.owned_by(self._username):
                         continue
+                    self._record_scheme(info)
                     mac = format_mac(info.mac)
                     if any(m == mac and h != info.ip for m, h in lost):
-                        await async_hand_off_if_verified(
-                            self.hass,
-                            host=info.ip,
-                            mac=info.mac,
-                            owner_email=self._username,
-                        )
+                        await self._async_handle_moved(info)
             except Exception as exc:  # noqa: BLE001 - isolate one subnet
                 LOGGER.debug("targeted sweep failed: %s", type(exc).__name__)
 
@@ -264,18 +320,17 @@ class SweepCoordinator(DataUpdateCoordinator[SweepState]):
         host_updates: list[str] = []
         ignored = set(self._entry.data.get(CONF_IGNORED_MACS, []))
 
+        self._prune_moved_cards()
         for mac, info in owned.items():
             assert info.ip is not None  # noqa: S101 - filtered above
+            self._record_scheme(info)
             tplink_entry = async_tplink_entry_for_mac(self.hass, mac)
             if tplink_entry is not None:
                 if not is_lost(self.hass, tplink_entry):
                     continue
                 if info.ip == tplink_entry.data.get("host"):
                     continue
-                identity = await async_hand_off_if_verified(
-                    self.hass, host=info.ip, mac=mac, owner_email=self._username
-                )
-                if identity is IdentityResult.VERIFIED:
+                if await self._async_handle_moved(info):
                     host_updates.append(mac)
                 continue
 

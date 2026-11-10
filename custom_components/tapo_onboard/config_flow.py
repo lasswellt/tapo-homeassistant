@@ -70,8 +70,10 @@ from .const import (
 )
 from .coordinator import FlowResult
 from .onboarding import (
+    IdentityResult,
     OnboardOutcome,
     async_get_tdp_query,
+    async_hand_off_if_verified,
     async_onboard_device,
     async_request_host_update,
     async_tplink_entry_for_mac,
@@ -95,6 +97,12 @@ _DISCOVERY_ABORTS = {
     OnboardOutcome.CANNOT_CONNECT: "cannot_connect",
     OnboardOutcome.UNAVAILABLE: "tplink_unavailable",
     OnboardOutcome.PENDING_CONFIRMATION: "pending_confirmation",
+}
+
+_MOVED_ABORTS = {
+    IdentityResult.VERIFIED: "device_moved",
+    IdentityResult.MISMATCH: "identity_mismatch",
+    IdentityResult.NO_REPLY: "cannot_connect",
 }
 
 _MODEL_UNSAFE = re.compile(r"[^A-Za-z0-9 ._()/+-]")
@@ -480,11 +488,15 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_integration_discovery(
         self, discovery_info: dict[str, Any]
     ) -> ConfigFlowResult:
-        """Offer a new device found by the background sweep as a card."""
+        """Offer a new or moved device found by the background sweep as a card."""
         mac = str(discovery_info["mac"])
-        await self.async_set_unique_id(format_mac(mac))
+        moved = discovery_info.get("kind") == "moved"
+        await self.async_set_unique_id(
+            f"moved-{format_mac(mac)}" if moved else format_mac(mac)
+        )
         self._abort_if_unique_id_configured(reload_on_update=False)
-        if async_tplink_entry_for_mac(self.hass, mac) is not None:
+        has_entry = async_tplink_entry_for_mac(self.hass, mac) is not None
+        if has_entry != moved:
             return self.async_abort(reason="already_configured")
         try:
             host = str(ip_address(str(discovery_info["host"])))
@@ -499,7 +511,32 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
             "entry_id": str(discovery_info["entry_id"]),
         }
         self.context["title_placeholders"] = {"model": model, "host": host}
+        if moved:
+            return await self.async_step_moved_confirm()
         return await self.async_step_discovery_confirm()
+
+    async def async_step_moved_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Ask before core logs in at the new address of a device that moved."""
+        if user_input is None:
+            return self.async_show_form(
+                step_id="moved_confirm",
+                description_placeholders={
+                    "model": self._discovered["model"],
+                    "host": self._discovered["host"],
+                },
+            )
+        account = self.hass.config_entries.async_get_entry(self._discovered["entry_id"])
+        if account is None or account.state is not ConfigEntryState.LOADED:
+            return self.async_abort(reason="password_needed")
+        identity = await async_hand_off_if_verified(
+            self.hass,
+            host=self._discovered["host"],
+            mac=self._discovered["mac"],
+            owner_email=str(account.data[CONF_USERNAME]),
+        )
+        return self.async_abort(reason=_MOVED_ABORTS[identity])
 
     def _confirm_form(
         self, *, ask_password: bool, errors: dict[str, str]

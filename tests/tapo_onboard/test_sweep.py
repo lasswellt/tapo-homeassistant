@@ -45,16 +45,18 @@ def _info(
     ip: str = "192.168.1.5",
     model: str = "P110(US)",
     owner: str = USER,
+    scheme: str | None = None,
 ) -> TdpInfo:
-    info = TdpInfo.from_result(
-        {
-            "device_id": _md5(f"id-{mac}"),
-            "mac": mac,
-            "owner": _md5(owner),
-            "ip": ip,
-            "device_model": model,
-        }
-    )
+    result: dict[str, Any] = {
+        "device_id": _md5(f"id-{mac}"),
+        "mac": mac,
+        "owner": _md5(owner),
+        "ip": ip,
+        "device_model": model,
+    }
+    if scheme is not None:
+        result["mgt_encrypt_schm"] = {"encrypt_type": scheme}
+    info = TdpInfo.from_result(result)
     assert info is not None
     return info
 
@@ -190,8 +192,9 @@ async def test_lost_entry_at_new_ip_host_updated(
     hass: HomeAssistant, stub: type[StubTplinkFlow], udp: FakeSweep
 ) -> None:
     tp = _tplink(hass, ConfigEntryState.SETUP_RETRY)
-    udp.replies = [_info(ip="192.168.1.9")]
+    udp.replies = [_info(ip="192.168.1.9", scheme="KLAP")]
     coord = _coord(hass, _entry(hass))
+    coord._schemes[STUB_MAC] = "KLAP"
     await coord.async_refresh()
     await hass.async_block_till_done()
     assert coord.data.host_updates == (STUB_MAC,)
@@ -282,12 +285,14 @@ async def _tick(hass: HomeAssistant, seconds: int) -> None:
 @pytest.fixture
 async def started(
     hass: HomeAssistant,
-) -> AsyncIterator[Callable[[MockConfigEntry], None]]:
+) -> AsyncIterator[Callable[[MockConfigEntry], SweepCoordinator]]:
     entries: list[MockConfigEntry] = []
 
-    def _start(entry: MockConfigEntry) -> None:
-        _coord(hass, entry).async_start_lost_check()
+    def _start(entry: MockConfigEntry) -> SweepCoordinator:
+        coord = _coord(hass, entry)
+        coord.async_start_lost_check()
         entries.append(entry)
+        return coord
 
     yield _start
     for entry in entries:
@@ -298,12 +303,12 @@ async def test_lost_check_updates_host(
     hass: HomeAssistant,
     stub: type[StubTplinkFlow],
     udp: FakeSweep,
-    started: Callable[[MockConfigEntry], None],
+    started: Callable[[MockConfigEntry], SweepCoordinator],
 ) -> None:
     tp = _tplink(hass, ConfigEntryState.SETUP_RETRY)
-    udp.replies = [_info(ip="192.168.1.9")]
+    udp.replies = [_info(ip="192.168.1.9", scheme="KLAP")]
     entry = _entry(hass)
-    started(entry)
+    started(entry)._schemes[STUB_MAC] = "KLAP"
     await _tick(hass, 61)
     assert udp.calls == [("192.168.1.0/24",)]
     assert tp.data["host"] == "192.168.1.9"
@@ -313,7 +318,7 @@ async def test_lost_check_same_ip_no_flow(
     hass: HomeAssistant,
     stub: type[StubTplinkFlow],
     udp: FakeSweep,
-    started: Callable[[MockConfigEntry], None],
+    started: Callable[[MockConfigEntry], SweepCoordinator],
 ) -> None:
     tp = _tplink(hass, ConfigEntryState.SETUP_RETRY)
     udp.replies = [_info(ip="192.168.1.1")]
@@ -328,7 +333,7 @@ async def test_lost_check_nothing_lost_no_io(
     hass: HomeAssistant,
     stub: type[StubTplinkFlow],
     udp: FakeSweep,
-    started: Callable[[MockConfigEntry], None],
+    started: Callable[[MockConfigEntry], SweepCoordinator],
 ) -> None:
     _tplink(hass, ConfigEntryState.LOADED)
     started(_entry(hass))
@@ -363,7 +368,7 @@ async def test_lost_check_foreign_owner_ignored(
     hass: HomeAssistant,
     stub: type[StubTplinkFlow],
     udp: FakeSweep,
-    started: Callable[[MockConfigEntry], None],
+    started: Callable[[MockConfigEntry], SweepCoordinator],
 ) -> None:
     tp = _tplink(hass, ConfigEntryState.SETUP_RETRY)
     udp.replies = [_info(ip="192.168.1.9", owner="other@example.com")]
@@ -378,7 +383,7 @@ async def test_lost_check_stops_on_unload(
     hass: HomeAssistant,
     stub: type[StubTplinkFlow],
     udp: FakeSweep,
-    started: Callable[[MockConfigEntry], None],
+    started: Callable[[MockConfigEntry], SweepCoordinator],
 ) -> None:
     _tplink(hass, ConfigEntryState.SETUP_RETRY)
     entry = _entry(hass)
@@ -496,8 +501,9 @@ async def test_loaded_entry_all_entities_unavailable_is_lost(
     tp = _tplink(hass, ConfigEntryState.LOADED)
     _unavailable_entity(hass, tp, "a", STATE_UNAVAILABLE)
     _unavailable_entity(hass, tp, "b", STATE_UNAVAILABLE)
-    udp.replies = [_info(ip="192.168.1.9")]
+    udp.replies = [_info(ip="192.168.1.9", scheme="KLAP")]
     coord = _coord(hass, _entry(hass))
+    coord._schemes[STUB_MAC] = "KLAP"
     await coord.async_refresh()
     await hass.async_block_till_done()
     assert coord.data.host_updates == (STUB_MAC,)
@@ -599,7 +605,7 @@ async def test_lost_check_sweep_failure_is_isolated_per_subnet(
         seen.append(net)
         if net == "192.168.1.0/24":
             raise OSError("socket")
-        return [_info(MAC2, ip="10.0.5.9")]
+        return [_info(MAC2, ip="10.0.5.9", scheme="KLAP")]
 
     async def _probe(host: str, *, query: bytes, **_: object) -> TdpInfo | None:
         return _info(MAC2, host)
@@ -609,8 +615,153 @@ async def test_lost_check_sweep_failure_is_isolated_per_subnet(
         patch("custom_components.tapo_onboard.onboarding.async_probe", _probe),
     ):
         coord = _coord(hass, _entry(hass))
+        coord._schemes[format_mac(MAC2)] = "KLAP"
         await coord._async_check_lost()
         await hass.async_block_till_done()
     assert seen == ["192.168.1.0/24", "10.0.5.0/24"]
     assert first.data["host"] == "192.168.1.1"
     assert second.data["host"] == "10.0.5.9"
+
+
+def _cards(hass: HomeAssistant) -> list[Any]:
+    return hass.config_entries.flow.async_progress_by_handler("tapo_onboard")
+
+
+def _loaded_tplink_with_entity(
+    hass: HomeAssistant,
+) -> tuple[MockConfigEntry, str]:
+    tp = _tplink(hass, ConfigEntryState.LOADED)
+    ent = er.async_get(hass).async_get_or_create(
+        "switch", "tplink", "a", config_entry=tp
+    )
+    hass.states.async_set(ent.entity_id, "on")
+    return tp, ent.entity_id
+
+
+async def test_healthy_klap_then_lost_moved_klap_auto_repoints(
+    hass: HomeAssistant, stub: type[StubTplinkFlow], udp: FakeSweep
+) -> None:
+    tp, ent_id = _loaded_tplink_with_entity(hass)
+    coord = _coord(hass, _entry(hass))
+    udp.replies = [_info(ip="192.168.1.1", scheme="klap")]
+    await coord.async_refresh()
+    assert coord._schemes == {STUB_MAC: "KLAP"}
+    hass.states.async_set(ent_id, STATE_UNAVAILABLE)
+    udp.replies = [_info(ip="192.168.1.9", scheme="KLAP")]
+    await coord.async_refresh()
+    await hass.async_block_till_done()
+    assert coord.data.host_updates == (STUB_MAC,)
+    assert tp.data["host"] == "192.168.1.9"
+    assert _cards(hass) == []
+
+
+@pytest.mark.parametrize(
+    ("recorded", "moved_scheme"),
+    [("AES", "AES"), (None, "KLAP"), ("KLAP", "AES"), ("KLAP", None)],
+)
+async def test_moved_without_klap_on_both_sides_starts_card_only(
+    hass: HomeAssistant,
+    stub: type[StubTplinkFlow],
+    udp: FakeSweep,
+    recorded: str | None,
+    moved_scheme: str | None,
+) -> None:
+    tp, ent_id = _loaded_tplink_with_entity(hass)
+    coord = _coord(hass, _entry(hass))
+    if recorded is not None:
+        udp.replies = [_info(ip="192.168.1.1", scheme=recorded)]
+        await coord.async_refresh()
+    hass.states.async_set(ent_id, STATE_UNAVAILABLE)
+    udp.replies = [_info(ip="192.168.1.9", scheme=moved_scheme)]
+    await coord.async_refresh()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert coord.data.host_updates == ()
+    assert tp.data["host"] == "192.168.1.1"
+    assert stub.dhcp_infos == []
+    assert hass.config_entries.flow.async_progress_by_handler("tplink") == []
+    cards = _cards(hass)
+    assert [c["context"]["unique_id"] for c in cards] == [f"moved-{STUB_MAC}"]
+    assert cards[0]["step_id"] == "moved_confirm"
+
+
+async def test_moved_card_once_per_lost_episode(
+    hass: HomeAssistant, stub: type[StubTplinkFlow], udp: FakeSweep
+) -> None:
+    tp, ent_id = _loaded_tplink_with_entity(hass)
+    coord = _coord(hass, _entry(hass))
+    udp.replies = [_info(ip="192.168.1.1", scheme="AES")]
+    await coord.async_refresh()
+    hass.states.async_set(ent_id, STATE_UNAVAILABLE)
+    udp.replies = [_info(ip="192.168.1.9", scheme="AES")]
+    with patch(
+        "custom_components.tapo_onboard.sweep.discovery_flow.async_create_flow"
+    ) as create:
+        await coord.async_refresh()
+        await coord.async_refresh()
+        assert create.call_count == 1
+        assert create.call_args.args[3] == {
+            "kind": "moved",
+            "host": "192.168.1.9",
+            "mac": STUB_MAC,
+            "model": "P110",
+            "entry_id": coord._entry.entry_id,
+        }
+        # The device comes back, then goes away again: a new episode.
+        hass.states.async_set(ent_id, "on")
+        udp.replies = [_info(ip="192.168.1.1", scheme="AES")]
+        await coord.async_refresh()
+        assert coord._moved_cards == set()
+        hass.states.async_set(ent_id, STATE_UNAVAILABLE)
+        udp.replies = [_info(ip="192.168.1.9", scheme="AES")]
+        await coord.async_refresh()
+        assert create.call_count == 2
+
+
+async def test_moved_card_marker_dropped_when_entry_removed(
+    hass: HomeAssistant, stub: type[StubTplinkFlow], udp: FakeSweep
+) -> None:
+    tp = _tplink(hass, ConfigEntryState.SETUP_RETRY)
+    udp.replies = [_info(ip="192.168.1.9", scheme="AES")]
+    coord = _coord(hass, _entry(hass))
+    await coord.async_refresh()
+    assert coord._moved_cards == {STUB_MAC}
+    await hass.config_entries.async_remove(tp.entry_id)
+    coord._prune_moved_cards()
+    assert coord._moved_cards == set()
+
+
+async def test_lost_check_moved_klap_auto_repoints(
+    hass: HomeAssistant,
+    stub: type[StubTplinkFlow],
+    udp: FakeSweep,
+    started: Callable[[MockConfigEntry], SweepCoordinator],
+) -> None:
+    tp, ent_id = _loaded_tplink_with_entity(hass)
+    coord = started(_entry(hass))
+    udp.replies = [_info(ip="192.168.1.1", scheme="KLAP")]
+    await coord.async_refresh()
+    hass.states.async_set(ent_id, STATE_UNAVAILABLE)
+    udp.replies = [_info(ip="192.168.1.9", scheme="KLAP")]
+    await _tick(hass, 61)
+    assert tp.data["host"] == "192.168.1.9"
+    assert _cards(hass) == []
+
+
+async def test_lost_check_moved_aes_starts_card_once(
+    hass: HomeAssistant,
+    stub: type[StubTplinkFlow],
+    udp: FakeSweep,
+    started: Callable[[MockConfigEntry], SweepCoordinator],
+) -> None:
+    tp, ent_id = _loaded_tplink_with_entity(hass)
+    coord = started(_entry(hass))
+    udp.replies = [_info(ip="192.168.1.1", scheme="AES")]
+    await coord.async_refresh()
+    hass.states.async_set(ent_id, STATE_UNAVAILABLE)
+    udp.replies = [_info(ip="192.168.1.9", scheme="AES")]
+    await _tick(hass, 61)
+    await _tick(hass, 122)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert tp.data["host"] == "192.168.1.1"
+    assert stub.dhcp_infos == []
+    assert [c["context"]["unique_id"] for c in _cards(hass)] == [f"moved-{STUB_MAC}"]

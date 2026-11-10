@@ -213,6 +213,9 @@ failures, so pick one per device.
 
 ## Security posture
 
+- **Moved devices.** In local mode a device that changed address is updated
+  automatically only if it uses KLAP (which proves the device knows your credentials
+  before anything is sent); other devices show a "moved" card to confirm.
 - **Your Tapo password is never written to disk.** It is exchanged for a cloud refresh
   token and kept in memory only until Home Assistant restarts.
 - **What is stored** in Home Assistant's config entry storage, like every
