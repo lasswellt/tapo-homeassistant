@@ -1092,6 +1092,24 @@ async def test_discovery_confirm_password_lost_before_submit_asks_again(
     assert [str(k) for k in schema] == ["password"]
 
 
+async def test_discovery_confirm_typed_password_wins_over_remembered(
+    hass: HomeAssistant,
+) -> None:
+    """A card shown while setup was in progress keeps the password the user typed."""
+    entry = _account(hass, password=None)
+    StubTplinkFlow.connect_result = "auth"
+    StubTplinkFlow.valid_password = "typed"
+    result = await _discover(hass, entry.entry_id)
+    schema = cast("vol.Schema", result["data_schema"]).schema
+    assert [str(k) for k in schema] == ["password"]
+    entry.runtime_data.password = "remembered"
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"password": "typed"}
+    )
+    assert result["reason"] == "device_added"
+    assert entry.runtime_data.password == "typed"
+
+
 @pytest.mark.parametrize(
     ("outcome", "reason"),
     [

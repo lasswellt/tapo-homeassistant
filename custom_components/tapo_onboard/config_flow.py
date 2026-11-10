@@ -584,7 +584,9 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
             return self._confirm_form(ask_password=ask, errors={})
         if loaded is None:
             return self.async_abort(reason="password_needed")
-        typed = str(user_input.get(CONF_PASSWORD) or "") if ask else ""
+        # A typed password always wins, also when the entry finished setting up
+        # (and gained a remembered one) while this card was open.
+        typed = str(user_input.get(CONF_PASSWORD) or "")
         password: str | None
         if self._ask_password:
             # The remembered password was just rejected: only a typed one counts.
