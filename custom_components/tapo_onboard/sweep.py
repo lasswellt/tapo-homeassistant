@@ -12,6 +12,7 @@ owner hash is public, so the user confirms each new device first.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -88,6 +89,20 @@ def _model_base(model: str | None) -> str:
     return (model or "").split("(", 1)[0].strip()
 
 
+_MODEL_UNSAFE = re.compile(r"[^A-Za-z0-9 ._()/+-]")
+MAX_MODEL_LENGTH = 40
+
+
+def safe_model(model: str | None) -> str:
+    """Return a model name that is safe to show in a card or repair.
+
+    The TDP reply is unauthenticated, so anything outside a plain model
+    charset (markdown, links) is dropped and the length is capped.
+    """
+    cleaned = _MODEL_UNSAFE.sub("", model or "")
+    return cleaned[:MAX_MODEL_LENGTH].strip() or "Tapo device"
+
+
 def is_lost(hass: HomeAssistant, tplink_entry: ConfigEntry) -> bool:
     """Return True when the `tplink` entry cannot reach its device.
 
@@ -142,8 +157,9 @@ class SweepCoordinator(DataUpdateCoordinator[SweepState]):
         self._last_targeted: dict[IPv4Network, datetime] = {}
         # MAC -> login scheme the device showed while healthy at its known host.
         self._schemes: dict[str, str | None] = {}
-        # MACs whose "moved" card was started in the current lost episode.
-        self._moved_cards: set[str] = set()
+        # MAC -> (address, time) of the last "moved" card offered in the current
+        # lost episode.
+        self._moved_cards: dict[str, tuple[str, datetime]] = {}
         if flow_result is not None:
             self._attempted.update(
                 mac for mac, o in flow_result.outcomes.items() if o in _TERMINAL
@@ -190,7 +206,7 @@ class SweepCoordinator(DataUpdateCoordinator[SweepState]):
         for mac in list(self._moved_cards):
             entry = async_tplink_entry_for_mac(self.hass, mac)
             if entry is None or not is_lost(self.hass, entry):
-                self._moved_cards.discard(mac)
+                del self._moved_cards[mac]
 
     async def _async_handle_moved(self, info: TdpInfo) -> bool:
         """Re-point a lost entry whose device answers elsewhere.
@@ -210,8 +226,22 @@ class SweepCoordinator(DataUpdateCoordinator[SweepState]):
                 self.hass, host=info.ip, mac=info.mac, owner_email=self._username
             )
             return identity is IdentityResult.VERIFIED
-        if mac not in self._moved_cards:
-            self._moved_cards.add(mac)
+        unique_id = f"moved-{mac}-{info.ip}"
+        now = dt_util.utcnow()
+        offered = self._moved_cards.get(mac)
+        # Re-offer a card nobody answered once per sweep interval, never while
+        # one is open; a new address is offered at once.
+        if (
+            offered is None
+            or offered[0] != info.ip
+            or (
+                now - offered[1] >= SWEEP_INTERVAL
+                and not self.hass.config_entries.flow.async_progress_by_handler(
+                    DOMAIN, match_context={"unique_id": unique_id}
+                )
+            )
+        ):
+            self._moved_cards[mac] = (info.ip, now)
             discovery_flow.async_create_flow(
                 self.hass,
                 DOMAIN,
@@ -220,7 +250,7 @@ class SweepCoordinator(DataUpdateCoordinator[SweepState]):
                     "kind": "moved",
                     "host": info.ip,
                     "mac": info.mac,
-                    "model": _model_base(info.device_model) or "Tapo device",
+                    "model": safe_model(_model_base(info.device_model)),
                     "entry_id": self._entry.entry_id,
                 },
             )
@@ -295,7 +325,7 @@ class SweepCoordinator(DataUpdateCoordinator[SweepState]):
             translation_key="tpap_firmware_detected",
             translation_placeholders={
                 "devices": ", ".join(
-                    f"{_model_base(i.device_model) or 'Tapo'} ({i.ip})" for i in tpap
+                    f"{safe_model(_model_base(i.device_model))} ({i.ip})" for i in tpap
                 )
             },
         )

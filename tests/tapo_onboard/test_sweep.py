@@ -680,7 +680,9 @@ async def test_moved_without_klap_on_both_sides_starts_card_only(
     assert stub.dhcp_infos == []
     assert hass.config_entries.flow.async_progress_by_handler("tplink") == []
     cards = _cards(hass)
-    assert [c["context"]["unique_id"] for c in cards] == [f"moved-{STUB_MAC}"]
+    assert [c["context"]["unique_id"] for c in cards] == [
+        f"moved-{STUB_MAC}-192.168.1.9"
+    ]
     assert cards[0]["step_id"] == "moved_confirm"
 
 
@@ -710,7 +712,7 @@ async def test_moved_card_once_per_lost_episode(
         hass.states.async_set(ent_id, "on")
         udp.replies = [_info(ip="192.168.1.1", scheme="AES")]
         await coord.async_refresh()
-        assert coord._moved_cards == set()
+        assert coord._moved_cards == {}
         hass.states.async_set(ent_id, STATE_UNAVAILABLE)
         udp.replies = [_info(ip="192.168.1.9", scheme="AES")]
         await coord.async_refresh()
@@ -724,10 +726,10 @@ async def test_moved_card_marker_dropped_when_entry_removed(
     udp.replies = [_info(ip="192.168.1.9", scheme="AES")]
     coord = _coord(hass, _entry(hass))
     await coord.async_refresh()
-    assert coord._moved_cards == {STUB_MAC}
+    assert list(coord._moved_cards) == [STUB_MAC]
     await hass.config_entries.async_remove(tp.entry_id)
     coord._prune_moved_cards()
-    assert coord._moved_cards == set()
+    assert coord._moved_cards == {}
 
 
 async def test_lost_check_moved_klap_auto_repoints(
@@ -764,4 +766,92 @@ async def test_lost_check_moved_aes_starts_card_once(
     await hass.async_block_till_done(wait_background_tasks=True)
     assert tp.data["host"] == "192.168.1.1"
     assert stub.dhcp_infos == []
-    assert [c["context"]["unique_id"] for c in _cards(hass)] == [f"moved-{STUB_MAC}"]
+    assert [c["context"]["unique_id"] for c in _cards(hass)] == [
+        f"moved-{STUB_MAC}-192.168.1.9"
+    ]
+
+
+async def _lost_with_card(
+    hass: HomeAssistant, udp: FakeSweep, ip: str = "192.168.1.9"
+) -> tuple[SweepCoordinator, Any]:
+    tp, ent_id = _loaded_tplink_with_entity(hass)
+    coord = _coord(hass, _entry(hass))
+    udp.replies = [_info(ip="192.168.1.1", scheme="AES")]
+    await coord.async_refresh()
+    hass.states.async_set(ent_id, STATE_UNAVAILABLE)
+    udp.replies = [_info(ip=ip, scheme="AES")]
+    return coord, tp
+
+
+async def test_moved_card_reoffered_after_interval_when_it_ended(
+    hass: HomeAssistant, stub: type[StubTplinkFlow], udp: FakeSweep
+) -> None:
+    coord, _ = await _lost_with_card(hass, udp)
+    with patch(
+        "custom_components.tapo_onboard.sweep.discovery_flow.async_create_flow"
+    ) as create:
+        await coord.async_refresh()
+        # Inside the interval: no second offer even though nothing is open.
+        await coord.async_refresh()
+        assert create.call_count == 1
+        later = dt_util.utcnow() + timedelta(minutes=16)
+        with patch(
+            "custom_components.tapo_onboard.sweep.dt_util.utcnow", lambda: later
+        ):
+            await coord.async_refresh()
+        assert create.call_count == 2
+
+
+async def test_moved_card_not_reoffered_while_one_is_open(
+    hass: HomeAssistant, stub: type[StubTplinkFlow], udp: FakeSweep
+) -> None:
+    coord, _ = await _lost_with_card(hass, udp)
+    await coord.async_refresh()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    flows = _cards(hass)
+    assert len(flows) == 1
+    later = dt_util.utcnow() + timedelta(minutes=16)
+    with (
+        patch("custom_components.tapo_onboard.sweep.dt_util.utcnow", lambda: later),
+        patch(
+            "custom_components.tapo_onboard.sweep.discovery_flow.async_create_flow"
+        ) as create,
+    ):
+        await coord.async_refresh()
+    create.assert_not_called()
+    assert _cards(hass) == flows
+
+
+async def test_moved_card_new_ip_offered_at_once_and_ignore_is_per_address(
+    hass: HomeAssistant, stub: type[StubTplinkFlow], udp: FakeSweep
+) -> None:
+    coord, _ = await _lost_with_card(hass, udp)
+    MockConfigEntry(
+        domain="tapo_onboard",
+        unique_id=f"moved-{STUB_MAC}-192.168.1.9",
+        source="ignore",
+        data={},
+    ).add_to_hass(hass)
+    await coord.async_refresh()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert _cards(hass) == []  # that address was ignored
+    udp.replies = [_info(ip="192.168.1.10", scheme="AES")]
+    await coord.async_refresh()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert [c["context"]["unique_id"] for c in _cards(hass)] == [
+        f"moved-{STUB_MAC}-192.168.1.10"
+    ]
+
+
+async def test_tpap_issue_model_is_sanitised(
+    hass: HomeAssistant, stub: type[StubTplinkFlow], udp: FakeSweep
+) -> None:
+    info = _tpap_info()
+    object.__setattr__(info, "device_model", "[click](http://evil.example)<b>X")
+    udp.replies = [info]
+    entry = _entry(hass)
+    await _coord(hass, entry).async_refresh()
+    devices = _issue(hass, entry).translation_placeholders["devices"]
+    assert "[" not in devices
+    assert "<" not in devices
+    assert "http:" not in devices

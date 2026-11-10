@@ -83,7 +83,7 @@ rules:
   docs-use-cases: todo
   dynamic-devices:
     status: done
-    comment: There are no devices of its own, but new devices are onboarded into core tplink automatically, by the 15-min local sweep (local mode) or the inventory coordinator (cloud mode).
+    comment: There are no devices of its own, but the 15-min local sweep (local mode) offers each new device as a card to confirm before it is onboarded into core tplink or the inventory coordinator (cloud mode).
   entity-category:
     status: exempt
     comment: Service integration with no entities or devices; it onboards devices into core tplink.

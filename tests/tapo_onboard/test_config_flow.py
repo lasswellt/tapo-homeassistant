@@ -1228,7 +1228,7 @@ async def test_moved_card_asks_nothing_and_has_own_unique_id(
     assert result["description_placeholders"] == {"model": "P110", "host": "10.0.0.5"}
     flow = hass.config_entries.flow.async_get(result["flow_id"])
     assert flow is not None
-    assert flow["context"]["unique_id"] == f"moved-{format_mac(STUB_MAC)}"
+    assert flow["context"]["unique_id"] == f"moved-{format_mac(STUB_MAC)}-10.0.0.5"
     assert flow["context"]["title_placeholders"] == {
         "model": "P110",
         "host": "10.0.0.5",
@@ -1438,3 +1438,49 @@ async def test_cloud_two_rejections_do_not_stop_run(hass: HomeAssistant) -> None
     ]
     # Cloud mode keeps the immediate host-update flow per rejected device.
     assert _dhcp_hosts() == sorted([HOSTS[STUB_MAC], HOSTS[MAC_PARTIAL]])
+
+
+async def test_moved_confirm_entry_removed_before_confirm_aborts(
+    hass: HomeAssistant,
+) -> None:
+    entry = _account(hass)
+    tp = _lost_tplink(hass)
+    result = await _moved(hass, entry.entry_id)
+    await hass.config_entries.async_remove(tp.entry_id)
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    await hass.async_block_till_done()
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "moved_entry_gone"
+    assert StubTplinkFlow.dhcp_infos == []
+
+
+async def test_discovery_card_empty_password_after_invalid_auth_needs_typing(
+    hass: HomeAssistant,
+) -> None:
+    entry = _account(hass)
+    StubTplinkFlow.connect_result = "auth"
+    StubTplinkFlow.valid_password = "right"
+    result = await _discover(hass, entry.entry_id)
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert result["errors"] == {"base": "invalid_auth"}
+    with patch(
+        "custom_components.tapo_onboard.config_flow.async_onboard_device",
+        wraps=importlib.import_module(
+            "custom_components.tapo_onboard.onboarding"
+        ).async_onboard_device,
+    ) as onboard:
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"password": ""}
+        )
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {"base": "password_required"}
+    onboard.assert_not_called()
+
+
+async def test_pick_devices_with_stale_input_shows_form(hass: HomeAssistant) -> None:
+    result = await _login(hass)
+    assert result["step_id"] == "pick_devices"
+    flow = hass.config_entries.flow._progress[result["flow_id"]]
+    again = await flow.async_step_pick_devices({"username": "stale"})
+    assert again["type"] == FlowResultType.FORM
+    assert again["step_id"] == "pick_devices"

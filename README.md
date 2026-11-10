@@ -215,7 +215,12 @@ failures, so pick one per device.
 
 - **Moved devices.** In local mode a device that changed address is updated
   automatically only if it uses KLAP (which proves the device knows your credentials
-  before anything is sent); other devices show a "moved" card to confirm.
+  before anything is sent); other devices show a "moved" card to confirm. A host
+  faking a moved KLAP device can make that entry need re-authentication, but learns
+  no secret.
+- **Core keeps the password too.** Core TP-Link Smart Home keeps the password in memory
+  after any successful login, and its own discovery on Home Assistant's network tries it
+  on new devices it finds (core behaviour, also when you add a device by hand).
 - **Your Tapo password is never written to disk.** It is exchanged for a cloud refresh
   token and kept in memory only until Home Assistant restarts.
 - **What is stored** in Home Assistant's config entry storage, like every

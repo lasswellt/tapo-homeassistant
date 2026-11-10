@@ -78,7 +78,7 @@ from .onboarding import (
     async_request_host_update,
     async_tplink_entry_for_mac,
 )
-from .sweep import _model_base
+from .sweep import _model_base, safe_model
 
 _FAILED = frozenset(
     {
@@ -104,9 +104,6 @@ _MOVED_ABORTS = {
     IdentityResult.MISMATCH: "identity_mismatch",
     IdentityResult.NO_REPLY: "moved_no_reply",
 }
-
-_MODEL_UNSAFE = re.compile(r"[^A-Za-z0-9 ._()/+-]")
-MAX_MODEL_LENGTH = 40
 
 MAX_PASSWORD_REJECTIONS = 2
 
@@ -492,7 +489,9 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
         mac = str(discovery_info["mac"])
         moved = discovery_info.get("kind") == "moved"
         await self.async_set_unique_id(
-            f"moved-{format_mac(mac)}" if moved else format_mac(mac)
+            f"moved-{format_mac(mac)}-{discovery_info['host']}"
+            if moved
+            else format_mac(mac)
         )
         self._abort_if_unique_id_configured(reload_on_update=False)
         has_entry = async_tplink_entry_for_mac(self.hass, mac) is not None
@@ -504,8 +503,7 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
             host = str(ip_address(str(discovery_info["host"])))
         except ValueError:
             return self.async_abort(reason="cannot_connect")
-        model = _MODEL_UNSAFE.sub("", str(discovery_info["model"]))
-        model = model[:MAX_MODEL_LENGTH].strip() or "Tapo device"
+        model = safe_model(str(discovery_info["model"]))
         self._discovered = {
             "host": host,
             "mac": mac,
@@ -532,6 +530,9 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
         account = self.hass.config_entries.async_get_entry(self._discovered["entry_id"])
         if account is None or account.state is not ConfigEntryState.LOADED:
             return self.async_abort(reason="password_needed")
+        # The entry may have been removed while the card was open.
+        if async_tplink_entry_for_mac(self.hass, self._discovered["mac"]) is None:
+            return self.async_abort(reason="moved_entry_gone")
         identity = await async_hand_off_if_verified(
             self.hass,
             host=self._discovered["host"],
@@ -584,7 +585,16 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
         if loaded is None:
             return self.async_abort(reason="password_needed")
         typed = str(user_input.get(CONF_PASSWORD) or "") if ask else ""
-        password = typed or remembered
+        password: str | None
+        if self._ask_password:
+            # The remembered password was just rejected: only a typed one counts.
+            if not typed:
+                return self._confirm_form(
+                    ask_password=True, errors={"base": "password_required"}
+                )
+            password = typed
+        else:
+            password = typed or remembered
         if not password:
             return self._confirm_form(ask_password=True, errors={})
         outcome = await async_onboard_device(
@@ -618,7 +628,8 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Let the user choose which devices to onboard."""
-        if user_input is not None:
+        # A progress step that finished at once hands its own input on here.
+        if user_input is not None and CONF_DEVICES in user_input:
             self._selected = set(user_input[CONF_DEVICES])
             self._ignored = sorted(
                 d.mac for d in self._candidates if d.mac not in self._selected

@@ -88,6 +88,7 @@
     "error": {
       "cannot_connect": "Cannot reach the TP-Link cloud. Try again later.",
       "invalid_auth": "Invalid email or password.",
+      "password_required": "Enter the password of your TP-Link account.",
       "rate_limited": "Too many attempts. Try again in {minutes} minutes.",
       "unknown": "Unexpected error.",
       "invalid_code": "The code must be 6 digits.",
@@ -111,7 +112,7 @@
       "pending_confirmation": "The device is still waiting for your confirmation.",
       "device_moved": "The device's TP-Link Smart Home entry was pointed to its new address.",
       "moved_entry_gone": "The device's TP-Link Smart Home entry no longer exists, so there is nothing to update.",
-      "moved_no_reply": "The device did not answer at the new address. It will be offered again if it is found there later."
+      "moved_no_reply": "The device did not answer at the new address. It will be offered again at the next sweep if it still answers there."
     },
     "create_entry": {
       "default": "Added: {added}. Needs your confirmation: {confirm}. Already configured: {already}. Failed: {failed}{failed_devices}."
