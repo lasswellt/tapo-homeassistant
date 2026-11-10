@@ -643,7 +643,7 @@ async def test_local_path_adds_owned_device(hass: HomeAssistant) -> None:
 
 async def test_local_no_devices_creates_entry(hass: HomeAssistant) -> None:
     async def _sweep(networks: list[str], *, query: bytes) -> list[TdpInfo]:
-        raise OSError("no socket")
+        return []
 
     with (
         patch(
@@ -785,12 +785,41 @@ async def test_local_only_foreign_and_ipless_replies_create_entry_without_pick(
     assert not hass.config_entries.async_entries("tplink")
 
 
-async def test_local_sweep_cancelled_creates_entry_without_pick(
+async def test_local_sweep_cancelled_shows_form_error(
     hass: HomeAssistant,
 ) -> None:
     p1, p2, p3 = _patched(asyncio.CancelledError)
     with p1, p2, p3:  # type: ignore[attr-defined]
         result = await _local_sweep(hass)
+        await hass.async_block_till_done()
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "local"
+    assert result["errors"] == {"base": "sweep_failed"}
+
+
+async def test_local_sweep_raises_shows_form_error_then_retry_proceeds(
+    hass: HomeAssistant,
+) -> None:
+    p1, p2, p3 = _patched(OSError)
+    with p1, p2, p3:  # type: ignore[attr-defined]
+        result = await _local_sweep(hass, "10.0.0.0/24, 10.0.1.0/24")
+        await hass.async_block_till_done()
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "local"
+    assert result["errors"] == {"base": "sweep_failed"}
+    schema = cast("vol.Schema", result["data_schema"]).schema
+    defaults = {str(k): k.default() for k in schema if k.default is not vol.UNDEFINED}
+    assert defaults == {
+        "username": EMAIL,
+        "subnets": "10.0.0.0/24, 10.0.1.0/24",
+    }
+    p1, p2, p3 = _patched([])
+    with p1, p2, p3:  # type: ignore[attr-defined]
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {"username": EMAIL, "password": PASSWORD, "subnets": "10.0.0.0/24"},
+        )
+        result = await _drive(hass, result)
         await hass.async_block_till_done()
     assert result["type"] == FlowResultType.CREATE_ENTRY
     assert result["data"]["subnets"] == ["10.0.0.0/24"]

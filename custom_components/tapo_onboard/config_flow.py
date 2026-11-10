@@ -150,6 +150,7 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
         self._task: asyncio.Task[None] | None = None
         self._reauth = False
         self._discovered: dict[str, str] = {}
+        self._sweep_failed = False
 
     @staticmethod
     def _error(err: Exception) -> tuple[str, dict[str, str]]:
@@ -239,6 +240,9 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Ask for the account email, password and the subnets to look in."""
         if user_input is None:
+            if self._sweep_failed:
+                self._sweep_failed = False
+                return self._local_form({"base": "sweep_failed"})
             self._subnets_text = ", ".join(await self._prefill_subnets())
             return self._local_form({})
         self._username = str(user_input[CONF_USERNAME]).strip()
@@ -301,8 +305,12 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
         task, self._task = self._task, None
         if task.cancelled():
             LOGGER.debug("Sweep was cancelled")
+            self._sweep_failed = True
         elif (err := task.exception()) is not None:
             LOGGER.debug("Sweep failed: %s", type(err).__name__)
+            self._sweep_failed = True
+        if self._sweep_failed:
+            return self.async_show_progress_done(next_step_id="local")
         return self.async_show_progress_done(
             next_step_id="pick_devices" if self._candidates else "finish"
         )

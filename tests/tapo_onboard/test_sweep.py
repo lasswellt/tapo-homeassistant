@@ -346,6 +346,19 @@ async def test_lost_check_floor_per_subnet(
     assert len(udp.calls) == 1
 
 
+async def test_lost_check_query_failure_is_isolated(
+    hass: HomeAssistant, stub: type[StubTplinkFlow], udp: FakeSweep
+) -> None:
+    _tplink(hass, ConfigEntryState.SETUP_RETRY)
+    coord = _coord(hass, _entry(hass))
+    with patch(
+        "custom_components.tapo_onboard.sweep.async_get_tdp_query",
+        side_effect=OSError,
+    ):
+        await coord._async_check_lost()
+    assert udp.calls == []
+
+
 async def test_lost_check_foreign_owner_ignored(
     hass: HomeAssistant,
     stub: type[StubTplinkFlow],

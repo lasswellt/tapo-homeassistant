@@ -192,7 +192,11 @@ class SweepCoordinator(DataUpdateCoordinator[SweepState]):
             by_subnet.setdefault(subnet, []).append((format_mac(tp.unique_id), host))
         if not by_subnet:
             return
-        query = await async_get_tdp_query(self.hass)
+        try:
+            query = await async_get_tdp_query(self.hass)
+        except Exception as exc:  # noqa: BLE001 - never raise out of the timer
+            LOGGER.debug("lost-check query failed: %s", type(exc).__name__)
+            return
         for subnet, lost in by_subnet.items():
             now = dt_util.utcnow()
             last = self._last_targeted.get(subnet)
