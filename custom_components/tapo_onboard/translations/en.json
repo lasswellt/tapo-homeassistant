@@ -1,5 +1,6 @@
 {
   "config": {
+    "flow_title": "{model} ({host})",
     "step": {
       "user": {
         "title": "Add Tapo devices",
@@ -64,6 +65,10 @@
         "data_description": {
           "devices": "The devices to add to TP-Link Smart Home."
         }
+      },
+      "discovery_confirm": {
+        "title": "New Tapo device found",
+        "description": "Found {model} at {host}. Confirming sends your TP-Link account password to this device so it can be added to TP-Link Smart Home. Only confirm if you recognise it."
       }
     },
     "progress": {
@@ -81,9 +86,14 @@
       "too_many_hosts": "Too many addresses. Search at most 4096 addresses in total, for example sixteen /24 networks."
     },
     "abort": {
-      "already_configured": "This account is already configured.",
+      "already_configured": "This account or device is already configured.",
       "wrong_account": "Sign in with the same TP-Link account that was originally configured.",
-      "reauth_successful": "[%key:common::config_flow::abort::reauth_successful%]"
+      "reauth_successful": "[%key:common::config_flow::abort::reauth_successful%]",
+      "device_added": "The device was added to TP-Link Smart Home.",
+      "auth_failed": "The device rejected your TP-Link account password. Add it from TP-Link Smart Home instead.",
+      "identity_mismatch": "The device at that address is not the one that was found. Nothing was sent.",
+      "password_needed": "The password is no longer in memory. Reload Tapo Onboard and enter your password again.",
+      "cannot_connect": "Cannot reach the device. It will be offered again after the next restart."
     },
     "create_entry": {
       "default": "Added: {added}. Needs your confirmation: {confirm}. Already configured: {already}. Failed: {failed}{failed_devices}."

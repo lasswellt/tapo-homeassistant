@@ -5,20 +5,27 @@
 
 Every `SWEEP_INTERVAL` it sends a TDP query to the configured subnets plus the
 /24 of each core `tplink` entry, keeps replies owned by the account username,
-repairs moved hosts of lost `tplink` entries and onboards new devices.
+repairs moved hosts of lost `tplink` entries and offers new devices as a
+discovery card. The password is never sent to a new device unattended: the TDP
+owner hash is public, so the user confirms each new device first.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from ipaddress import IPv4Network
 from typing import Final
 
-from homeassistant.config_entries import ConfigEntry, ConfigEntryState
+from homeassistant.config_entries import (
+    SOURCE_INTEGRATION_DISCOVERY,
+    ConfigEntry,
+    ConfigEntryState,
+)
 from homeassistant.const import STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import discovery_flow
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.device_registry import format_mac
@@ -49,7 +56,6 @@ from .onboarding import (
     OnboardOutcome,
     async_get_tdp_query,
     async_hand_off_if_verified,
-    async_onboard_device,
     async_tplink_entry_for_mac,
 )
 
@@ -115,7 +121,6 @@ class SweepCoordinator(DataUpdateCoordinator[SweepState]):
         hass: HomeAssistant,
         entry: ConfigEntry,
         *,
-        password: Callable[[], str | None],
         username: str,
         flow_result: FlowResult | None = None,
     ) -> None:
@@ -128,7 +133,6 @@ class SweepCoordinator(DataUpdateCoordinator[SweepState]):
             always_update=False,
         )
         self._entry = entry
-        self._password = password
         self._username = username
         self._issue_id = f"tpap_firmware_detected_{entry.entry_id}"
         entry.async_on_unload(
@@ -277,34 +281,19 @@ class SweepCoordinator(DataUpdateCoordinator[SweepState]):
                 or _model_base(info.device_model) in UNSUPPORTED_IN_CORE_MODELS
             ):
                 continue
-            password = self._password()
-            if password:
-                try:
-                    outcomes[mac] = await async_onboard_device(
-                        self.hass,
-                        host=info.ip,
-                        mac=mac,
-                        owner_email=self._username,
-                        username=self._username,
-                        password=password,
-                    )
-                except Exception as exc:  # noqa: BLE001 - isolate one device
-                    LOGGER.debug("onboarding %s failed: %s", mac, type(exc).__name__)
-                    outcomes[mac] = OnboardOutcome.CANNOT_CONNECT
-                if outcomes[mac] in _TERMINAL:
-                    self._attempted.add(mac)
-            else:
-                identity = await async_hand_off_if_verified(
-                    self.hass, host=info.ip, mac=mac, owner_email=self._username
-                )
-                if identity is IdentityResult.NO_REPLY:
-                    continue
-                outcomes[mac] = (
-                    OnboardOutcome.HANDED_TO_USER
-                    if identity is IdentityResult.VERIFIED
-                    else OnboardOutcome.IDENTITY_MISMATCH
-                )
-                self._attempted.add(mac)
+            discovery_flow.async_create_flow(
+                self.hass,
+                DOMAIN,
+                {"source": SOURCE_INTEGRATION_DISCOVERY},
+                {
+                    "host": info.ip,
+                    "mac": mac,
+                    "model": _model_base(info.device_model) or "Tapo device",
+                    "entry_id": self._entry.entry_id,
+                },
+            )
+            outcomes[mac] = OnboardOutcome.PENDING_CONFIRMATION
+            self._attempted.add(mac)
 
         return SweepState(
             devices=owned,

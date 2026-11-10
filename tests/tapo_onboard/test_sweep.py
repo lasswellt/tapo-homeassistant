@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import patch
 
 import pytest
-from homeassistant.config_entries import SOURCE_DHCP, ConfigEntryState
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
@@ -22,7 +22,9 @@ from homeassistant.helpers.device_registry import format_mac
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
+    MockModule,
     async_fire_time_changed,
+    mock_integration,
 )
 from stub_tplink import STUB_MAC, StubTplinkFlow, stub_tplink
 from tapolink_proto.discovery import TdpInfo
@@ -87,6 +89,9 @@ def probe() -> Iterator[None]:
 
 @pytest.fixture
 def stub(hass: HomeAssistant) -> Iterator[type[StubTplinkFlow]]:
+    # The manifest depends on core `dhcp`/`network`, whose extras are not installed.
+    mock_integration(hass, MockModule("dhcp"))
+    mock_integration(hass, MockModule("network"))
     with stub_tplink(hass) as flow:
         yield flow
 
@@ -112,43 +117,58 @@ def _tplink(
     return entry
 
 
-def _coord(
-    hass: HomeAssistant, entry: MockConfigEntry, password: str | None = None
-) -> SweepCoordinator:
+def _coord(hass: HomeAssistant, entry: MockConfigEntry) -> SweepCoordinator:
     mod = importlib.import_module("custom_components.tapo_onboard.sweep")
     return cast(
         "SweepCoordinator",
-        mod.SweepCoordinator(hass, entry, password=lambda: password, username=USER),
+        mod.SweepCoordinator(hass, entry, username=USER),
     )
 
 
-async def test_new_device_with_password_added(
+async def test_new_device_starts_confirmation_card_only(
     hass: HomeAssistant, stub: type[StubTplinkFlow], udp: FakeSweep
 ) -> None:
     udp.replies = [_info()]
-    coord = _coord(hass, _entry(hass), "secret")
-    await coord.async_refresh()
-    assert coord.data.outcomes[STUB_MAC].value == "added"
-    assert len(hass.config_entries.async_entries("tplink")) == 1
+    entry = _entry(hass)
+    coord = _coord(hass, entry)
+    with patch(
+        "custom_components.tapo_onboard.onboarding.async_onboard_device"
+    ) as onboard:
+        await coord.async_refresh()
+        await hass.async_block_till_done(wait_background_tasks=True)
+    onboard.assert_not_called()
+    assert coord.data.outcomes[STUB_MAC].value == "pending_confirmation"
+    assert hass.config_entries.flow.async_progress_by_handler("tplink") == []
+    assert hass.config_entries.async_entries("tplink") == []
+    assert stub.dhcp_infos == []
+    flows = hass.config_entries.flow.async_progress_by_handler("tapo_onboard")
+    assert [f["context"]["source"] for f in flows] == ["integration_discovery"]
+    assert flows[0]["context"]["unique_id"] == STUB_MAC
+    assert flows[0]["context"]["title_placeholders"] == {
+        "model": "P110",
+        "host": "192.168.1.5",
+    }
 
 
-async def test_new_device_without_password_dhcp_card(
+async def test_same_mac_next_sweep_starts_no_second_flow(
     hass: HomeAssistant, stub: type[StubTplinkFlow], udp: FakeSweep
 ) -> None:
     udp.replies = [_info()]
     coord = _coord(hass, _entry(hass))
     await coord.async_refresh()
-    await hass.async_block_till_done()
-    assert coord.data.outcomes[STUB_MAC].value == "handed_to_user"
-    flows = hass.config_entries.flow.async_progress_by_handler("tplink")
-    assert [f["context"]["source"] for f in flows] == [SOURCE_DHCP]
+    await hass.async_block_till_done(wait_background_tasks=True)
+    await coord.async_refresh()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert coord.data.outcomes == {}
+    assert len(hass.config_entries.flow.async_progress_by_handler("tapo_onboard")) == 1
+    assert hass.config_entries.flow.async_progress_by_handler("tplink") == []
 
 
 async def test_foreign_owner_ignored_and_counted(
     hass: HomeAssistant, stub: type[StubTplinkFlow], udp: FakeSweep
 ) -> None:
     udp.replies = [_info(owner="other@example.com")]
-    coord = _coord(hass, _entry(hass), "secret")
+    coord = _coord(hass, _entry(hass))
     await coord.async_refresh()
     assert coord.data.devices == {}
     assert coord.data.outcomes == {}
@@ -160,22 +180,10 @@ async def test_ignored_and_unsupported_skipped(
     hass: HomeAssistant, stub: type[StubTplinkFlow], udp: FakeSweep
 ) -> None:
     udp.replies = [_info(MAC2), _info(STUB_MAC, model="S310D(US)")]
-    coord = _coord(hass, _entry(hass, ignored_macs=[MAC2]), "secret")
+    coord = _coord(hass, _entry(hass, ignored_macs=[MAC2]))
     await coord.async_refresh()
     assert coord.data.outcomes == {}
     assert hass.config_entries.async_entries("tplink") == []
-
-
-async def test_attempted_not_retried(
-    hass: HomeAssistant, stub: type[StubTplinkFlow], udp: FakeSweep
-) -> None:
-    udp.replies = [_info()]
-    coord = _coord(hass, _entry(hass), "secret")
-    await coord.async_refresh()
-    assert coord.data.outcomes[STUB_MAC].value == "added"
-    await coord.async_refresh()
-    assert coord.data.outcomes == {}
-    assert len(hass.config_entries.async_entries("tplink")) == 1
 
 
 async def test_lost_entry_at_new_ip_host_updated(
@@ -593,39 +601,3 @@ async def test_lost_check_sweep_failure_is_isolated_per_subnet(
     assert seen == ["192.168.1.0/24", "10.0.5.0/24"]
     assert first.data["host"] == "192.168.1.1"
     assert second.data["host"] == "10.0.5.9"
-
-
-async def test_onboarding_exception_counts_as_cannot_connect_and_retries(
-    hass: HomeAssistant, stub: type[StubTplinkFlow], udp: FakeSweep
-) -> None:
-    udp.replies = [_info()]
-    coord = _coord(hass, _entry(hass), "secret")
-    with patch.object(
-        hass.config_entries.flow, "async_init", side_effect=RuntimeError("boom")
-    ):
-        await coord.async_refresh()
-    assert coord.last_update_success
-    assert coord.data.outcomes[STUB_MAC].value == "cannot_connect"
-    assert hass.config_entries.async_entries("tplink") == []
-    # CANNOT_CONNECT is retryable: the next sweep onboards it.
-    await coord.async_refresh()
-    assert coord.data.outcomes[STUB_MAC].value == "added"
-
-
-async def test_no_password_silent_host_is_retried_next_sweep(
-    hass: HomeAssistant, stub: type[StubTplinkFlow], udp: FakeSweep
-) -> None:
-    udp.replies = [_info()]
-    coord = _coord(hass, _entry(hass))
-    silent = True
-
-    async def _probe(host: str, *, query: bytes, **_: object) -> TdpInfo | None:
-        return None if silent else _info(STUB_MAC, host)
-
-    with patch("custom_components.tapo_onboard.onboarding.async_probe", _probe):
-        await coord.async_refresh()
-        assert coord.data.outcomes == {}
-        silent = False
-        await coord.async_refresh()
-    await hass.async_block_till_done()
-    assert coord.data.outcomes[STUB_MAC].value == "handed_to_user"

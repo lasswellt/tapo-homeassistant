@@ -20,6 +20,7 @@ from homeassistant.components import network
 from homeassistant.config_entries import ConfigEntryState, ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_USERNAME
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.device_registry import format_mac
 from homeassistant.helpers.selector import (
     SelectOptionDict,
     SelectSelector,
@@ -84,6 +85,13 @@ _FAILED = frozenset(
     }
 )
 
+_DISCOVERY_ABORTS = {
+    OnboardOutcome.ADDED: "device_added",
+    OnboardOutcome.ALREADY_CONFIGURED: "already_configured",
+    OnboardOutcome.AUTH_FAILED: "auth_failed",
+    OnboardOutcome.IDENTITY_MISMATCH: "identity_mismatch",
+}
+
 CONF_CODE = "code"
 CONF_DEVICES = "devices"
 
@@ -141,6 +149,7 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
         self._listed_at: datetime | None = None
         self._task: asyncio.Task[None] | None = None
         self._reauth = False
+        self._discovered: dict[str, str] = {}
 
     @staticmethod
     def _error(err: Exception) -> tuple[str, dict[str, str]]:
@@ -442,6 +451,56 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
                 entry.runtime_data.coordinator.async_request_refresh()
             )
         return result
+
+    async def async_step_integration_discovery(
+        self, discovery_info: dict[str, Any]
+    ) -> ConfigFlowResult:
+        """Offer a new device found by the background sweep as a card."""
+        mac = str(discovery_info["mac"])
+        await self.async_set_unique_id(format_mac(mac))
+        self._abort_if_unique_id_configured(reload_on_update=False)
+        if async_tplink_entry_for_mac(self.hass, mac) is not None:
+            return self.async_abort(reason="already_configured")
+        self._discovered = {
+            "host": str(discovery_info["host"]),
+            "mac": mac,
+            "model": str(discovery_info["model"]),
+            "entry_id": str(discovery_info["entry_id"]),
+        }
+        self.context["title_placeholders"] = {
+            "model": self._discovered["model"],
+            "host": self._discovered["host"],
+        }
+        return await self.async_step_discovery_confirm()
+
+    async def async_step_discovery_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Ask before the password goes to a device the sweep just found."""
+        if user_input is None:
+            return self.async_show_form(
+                step_id="discovery_confirm",
+                description_placeholders={
+                    "model": self._discovered["model"],
+                    "host": self._discovered["host"],
+                },
+            )
+        account = self.hass.config_entries.async_get_entry(self._discovered["entry_id"])
+        if (
+            account is None
+            or account.state is not ConfigEntryState.LOADED
+            or not account.runtime_data.password
+        ):
+            return self.async_abort(reason="password_needed")
+        outcome = await async_onboard_device(
+            self.hass,
+            host=self._discovered["host"],
+            mac=self._discovered["mac"],
+            owner_email=str(account.data[CONF_USERNAME]),
+            username=str(account.data[CONF_USERNAME]),
+            password=account.runtime_data.password,
+        )
+        return self.async_abort(reason=_DISCOVERY_ABORTS.get(outcome, "cannot_connect"))
 
     def _classify(self, device: _Candidate) -> _Kind:
         if async_tplink_entry_for_mac(self.hass, device.mac) is not None:

@@ -231,6 +231,11 @@ failures, so pick one per device.
     weak or reused password, and with it your whole TP-Link account (cameras
     included), not just the plugs.** The TPAP material slows guessing but does not
     prevent it for a weak password.
+- **New devices in local mode need your confirmation.** The owner hash a device
+  reports (MD5 of your account email) is public, so local mode cannot prove a newly
+  found device is genuine. After setup, Tapo Onboard shows a "Discovered" card and
+  only sends your password to the device once you confirm it. Ignoring the card
+  keeps it from coming back.
 - **What to do:**
   - use a **strong, unique** password for your TP-Link account, and don't reuse it
     anywhere else;

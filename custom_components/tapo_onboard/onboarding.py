@@ -33,6 +33,7 @@ class OnboardOutcome(StrEnum):
     CANNOT_CONNECT = "cannot_connect"
     UNAVAILABLE = "unavailable"
     IDENTITY_MISMATCH = "identity_mismatch"
+    PENDING_CONFIRMATION = "pending_confirmation"
 
 
 class IdentityResult(StrEnum):

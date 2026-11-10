@@ -9,12 +9,18 @@ import asyncio
 import hashlib
 import ssl
 from collections.abc import Iterator
+from types import SimpleNamespace
 from typing import cast
 from unittest.mock import patch
 
 import pytest
 import voluptuous as vol
-from homeassistant.config_entries import ConfigFlowResult
+from homeassistant.config_entries import (
+    SOURCE_IGNORE,
+    SOURCE_INTEGRATION_DISCOVERY,
+    ConfigEntryState,
+    ConfigFlowResult,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers.device_registry import format_mac
@@ -623,7 +629,10 @@ async def test_local_path_adds_owned_device(hass: HomeAssistant) -> None:
         "ignored_macs": [],
     }
     assert result["title"] == EMAIL.lower()
-    assert hass.data[DOMAIN][DATA_PENDING_PASSWORD][EMAIL.lower()] == PASSWORD
+    # Local setup moves the hand-off into the entry's memory-only runtime data.
+    assert EMAIL.lower() not in hass.data[DOMAIN][DATA_PENDING_PASSWORD]
+    (local_entry,) = hass.config_entries.async_entries(DOMAIN)
+    assert local_entry.runtime_data.password == PASSWORD
     assert [e.unique_id for e in hass.config_entries.async_entries("tplink")] == [
         format_mac(STUB_MAC)
     ]
@@ -840,3 +849,136 @@ async def test_local_pick_labels_defaults_outcomes_and_second_flow_aborts(
         )
     assert again["type"] == FlowResultType.ABORT
     assert again["reason"] == "already_configured"
+
+
+def _account(
+    hass: HomeAssistant, *, loaded: bool = True, password: str | None = PASSWORD
+) -> MockConfigEntry:
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=EMAIL.lower(),
+        data={"username": EMAIL, "mode": "local", "subnets": ["10.0.0.0/24"]},
+        state=ConfigEntryState.LOADED if loaded else ConfigEntryState.NOT_LOADED,
+    )
+    entry.add_to_hass(hass)
+    entry.runtime_data = SimpleNamespace(password=password)
+    return entry
+
+
+async def _discover(
+    hass: HomeAssistant,
+    entry_id: str,
+    mac: str = STUB_MAC,
+    host: str = "10.0.0.5",
+) -> ConfigFlowResult:
+    return await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": SOURCE_INTEGRATION_DISCOVERY},
+        data={"host": host, "mac": mac, "model": "P110", "entry_id": entry_id},
+    )
+
+
+async def test_discovery_shows_confirm_card(hass: HomeAssistant) -> None:
+    entry = _account(hass)
+    result = await _discover(hass, entry.entry_id)
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "discovery_confirm"
+    assert result["description_placeholders"] == {"model": "P110", "host": "10.0.0.5"}
+    flow = hass.config_entries.flow.async_get(result["flow_id"])
+    assert flow is not None
+    assert flow["context"]["unique_id"] == STUB_MAC
+    assert flow["context"]["title_placeholders"] == {
+        "model": "P110",
+        "host": "10.0.0.5",
+    }
+    assert hass.config_entries.async_entries("tplink") == []
+
+
+async def test_discovery_confirm_adds_device(hass: HomeAssistant) -> None:
+    entry = _account(hass)
+    result = await _discover(hass, entry.entry_id)
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "device_added"
+    assert [e.unique_id for e in hass.config_entries.async_entries("tplink")] == [
+        format_mac(STUB_MAC)
+    ]
+    assert len(hass.config_entries.async_entries(DOMAIN)) == 1
+
+
+@pytest.mark.parametrize(
+    ("setup", "reason"),
+    [
+        ("auth", "auth_failed"),
+        ("mismatch", "identity_mismatch"),
+        ("cannot_connect", "cannot_connect"),
+        ("silent", "cannot_connect"),
+    ],
+)
+async def test_discovery_confirm_failure_reasons(
+    hass: HomeAssistant, setup: str, reason: str
+) -> None:
+    entry = _account(hass)
+    if setup == "auth":
+        StubTplinkFlow.connect_result = "auth"
+        StubTplinkFlow.valid_password = "other"
+    elif setup == "mismatch":
+        PROBE_AS["10.0.0.5"] = MAC_PARTIAL
+    elif setup == "cannot_connect":
+        StubTplinkFlow.connect_result = "cannot_connect"
+    result = await _discover(
+        hass, entry.entry_id, host="10.0.0.99" if setup == "silent" else "10.0.0.5"
+    )
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == reason
+    assert hass.config_entries.async_entries("tplink") == []
+
+
+async def test_discovery_confirm_already_configured_outcome(
+    hass: HomeAssistant,
+) -> None:
+    entry = _account(hass)
+    result = await _discover(hass, entry.entry_id)
+    with patch(
+        "custom_components.tapo_onboard.config_flow.async_onboard_device",
+        return_value="already_configured",
+    ) as onboard:
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert result["reason"] == "already_configured"
+    assert onboard.call_args.kwargs["password"] == PASSWORD
+    assert onboard.call_args.kwargs["owner_email"] == EMAIL
+
+
+@pytest.mark.parametrize("case", ["missing", "unloaded", "no_password"])
+async def test_discovery_confirm_without_password_aborts(
+    hass: HomeAssistant, case: str
+) -> None:
+    entry = _account(
+        hass, loaded=case != "unloaded", password=None if case == "no_password" else "x"
+    )
+    result = await _discover(hass, "missing" if case == "missing" else entry.entry_id)
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "password_needed"
+    assert hass.config_entries.async_entries("tplink") == []
+
+
+async def test_discovery_ignored_mac_aborts(hass: HomeAssistant) -> None:
+    entry = _account(hass)
+    MockConfigEntry(
+        domain=DOMAIN, unique_id=format_mac(STUB_MAC), source=SOURCE_IGNORE, data={}
+    ).add_to_hass(hass)
+    result = await _discover(hass, entry.entry_id)
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+
+
+async def test_discovery_mac_in_tplink_aborts(hass: HomeAssistant) -> None:
+    entry = _account(hass)
+    MockConfigEntry(
+        domain="tplink", unique_id=format_mac(STUB_MAC), data={"host": "10.0.0.5"}
+    ).add_to_hass(hass)
+    result = await _discover(hass, entry.entry_id)
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "already_configured"

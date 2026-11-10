@@ -77,7 +77,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: TapoOnboardConfigEntry) 
             coordinator = SweepCoordinator(
                 hass,
                 entry,
-                password=password,
                 username=entry.data[CONF_USERNAME],
                 flow_result=flow_result,
             )
@@ -105,6 +104,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: TapoOnboardConfigEntry) 
         raise
     runtime = TapoOnboardRuntimeData(client, coordinator)
     entry.runtime_data = runtime
+    if isinstance(coordinator, SweepCoordinator):
+        # Keep the password in memory for the discovery card's confirm step.
+        password()
     entry.async_on_unload(_drop_handoff)
 
     # This integration has no entities, and `update_coordinator` only
