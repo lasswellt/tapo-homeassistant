@@ -337,6 +337,25 @@ async def test_hand_off_owner_mismatch_starts_nothing(
     assert stub.dhcp_infos == []
 
 
+async def test_hand_off_entry_removed_during_probe_starts_nothing(
+    hass: HomeAssistant, onb: ModuleType, stub: type[StubTplinkFlow]
+) -> None:
+    entry = MockConfigEntry(domain="tplink", unique_id="aa:bb:cc:dd:ee:ff", data={})
+    entry.add_to_hass(hass)
+
+    async def _fake(host: str, *, query: bytes, **_: object) -> TdpInfo | None:
+        await hass.config_entries.async_remove(entry.entry_id)
+        return _tdp(CLOUD_ID)
+
+    with patch("custom_components.tapo_onboard.onboarding.async_probe", _fake):
+        result = await onb.async_hand_off_if_verified(
+            hass, host=HOST, mac=STUB_MAC, device_id=CLOUD_ID
+        )
+    assert result is onb.IdentityResult.NO_REPLY
+    await hass.async_block_till_done()
+    assert stub.dhcp_infos == []
+
+
 async def test_claim_arguments_exactly_one(
     hass: HomeAssistant, onb: ModuleType
 ) -> None:

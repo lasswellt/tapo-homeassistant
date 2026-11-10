@@ -11,7 +11,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from ipaddress import IPv4Network
+from ipaddress import IPv4Network, ip_address
 from typing import Any
 from uuid import uuid4
 
@@ -91,7 +91,14 @@ _DISCOVERY_ABORTS = {
     OnboardOutcome.ALREADY_CONFIGURED: "already_configured",
     OnboardOutcome.AUTH_FAILED: "auth_failed",
     OnboardOutcome.IDENTITY_MISMATCH: "identity_mismatch",
+    OnboardOutcome.HANDED_TO_USER: "handed_to_user",
+    OnboardOutcome.CANNOT_CONNECT: "cannot_connect",
+    OnboardOutcome.UNAVAILABLE: "tplink_unavailable",
+    OnboardOutcome.PENDING_CONFIRMATION: "pending_confirmation",
 }
+
+_MODEL_UNSAFE = re.compile(r"[^A-Za-z0-9 ._()/+-]")
+MAX_MODEL_LENGTH = 40
 
 MAX_PASSWORD_REJECTIONS = 2
 
@@ -153,6 +160,7 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
         self._task: asyncio.Task[None] | None = None
         self._reauth = False
         self._discovered: dict[str, str] = {}
+        self._ask_password = False
         self._sweep_failed = False
         self._password_rejected = False
         self._stopped = False
@@ -245,10 +253,10 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Ask for the account email, password and the subnets to look in."""
         # A progress step that finished at once hands its own input on here.
+        if self._sweep_failed:
+            self._sweep_failed = False
+            return self._local_form({"base": "sweep_failed"})
         if user_input is None or CONF_USERNAME not in user_input:
-            if self._sweep_failed:
-                self._sweep_failed = False
-                return self._local_form({"base": "sweep_failed"})
             if self._password_rejected:
                 self._password_rejected = False
                 return self._local_form({"base": "password_rejected"})
@@ -478,46 +486,85 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
         self._abort_if_unique_id_configured(reload_on_update=False)
         if async_tplink_entry_for_mac(self.hass, mac) is not None:
             return self.async_abort(reason="already_configured")
+        try:
+            host = str(ip_address(str(discovery_info["host"])))
+        except ValueError:
+            return self.async_abort(reason="cannot_connect")
+        model = _MODEL_UNSAFE.sub("", str(discovery_info["model"]))
+        model = model[:MAX_MODEL_LENGTH].strip() or "Tapo device"
         self._discovered = {
-            "host": str(discovery_info["host"]),
+            "host": host,
             "mac": mac,
-            "model": str(discovery_info["model"]),
+            "model": model,
             "entry_id": str(discovery_info["entry_id"]),
         }
-        self.context["title_placeholders"] = {
-            "model": self._discovered["model"],
-            "host": self._discovered["host"],
-        }
+        self.context["title_placeholders"] = {"model": model, "host": host}
         return await self.async_step_discovery_confirm()
+
+    def _confirm_form(
+        self, *, ask_password: bool, errors: dict[str, str]
+    ) -> ConfigFlowResult:
+        schema = (
+            vol.Schema(
+                {
+                    vol.Required(CONF_PASSWORD): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.PASSWORD)
+                    )
+                }
+            )
+            if ask_password
+            else None
+        )
+        return self.async_show_form(
+            step_id="discovery_confirm",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders={
+                "model": self._discovered["model"],
+                "host": self._discovered["host"],
+            },
+        )
 
     async def async_step_discovery_confirm(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Ask before the password goes to a device the sweep just found."""
-        if user_input is None:
-            return self.async_show_form(
-                step_id="discovery_confirm",
-                description_placeholders={
-                    "model": self._discovered["model"],
-                    "host": self._discovered["host"],
-                },
-            )
+        """Ask before the password goes to a device the sweep just found.
+
+        The password is asked here when the account entry has none in memory
+        (after a restart); an accepted one is kept in memory only.
+        """
         account = self.hass.config_entries.async_get_entry(self._discovered["entry_id"])
-        if (
-            account is None
-            or account.state is not ConfigEntryState.LOADED
-            or not account.runtime_data.password
-        ):
+        loaded = (
+            account if account and account.state is ConfigEntryState.LOADED else None
+        )
+        # A card can appear while the account entry is still setting up.
+        remembered: str | None = loaded.runtime_data.password if loaded else None
+        ask = self._ask_password or not remembered
+        if user_input is None:
+            return self._confirm_form(ask_password=ask, errors={})
+        if loaded is None:
             return self.async_abort(reason="password_needed")
+        typed = str(user_input.get(CONF_PASSWORD) or "") if ask else ""
+        password = typed or remembered
+        if not password:
+            return self._confirm_form(ask_password=True, errors={})
         outcome = await async_onboard_device(
             self.hass,
             host=self._discovered["host"],
             mac=self._discovered["mac"],
-            owner_email=str(account.data[CONF_USERNAME]),
-            username=str(account.data[CONF_USERNAME]),
-            password=account.runtime_data.password,
+            owner_email=str(loaded.data[CONF_USERNAME]),
+            username=str(loaded.data[CONF_USERNAME]),
+            password=password,
+            request_host_update=False,
         )
-        return self.async_abort(reason=_DISCOVERY_ABORTS.get(outcome, "cannot_connect"))
+        if outcome is OnboardOutcome.AUTH_FAILED:
+            self._ask_password = True
+            return self._confirm_form(
+                ask_password=True, errors={"base": "invalid_auth"}
+            )
+        if outcome is OnboardOutcome.ADDED and typed:
+            loaded.runtime_data.password = typed
+        return self.async_abort(reason=_DISCOVERY_ABORTS[outcome])
 
     def _classify(self, device: _Candidate) -> _Kind:
         if async_tplink_entry_for_mac(self.hass, device.mac) is not None:

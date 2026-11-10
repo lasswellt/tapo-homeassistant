@@ -120,13 +120,19 @@ async def async_hand_off_if_verified(
     """Start core's DHCP flow for `host` only once it proves the identity.
 
     Core's DHCP flow logs in with stored credentials, so nothing is started for
-    a MISMATCH or NO_REPLY host.
+    a MISMATCH or NO_REPLY host. When the MAC had a `tplink` entry and it is gone
+    once the probe returns, nothing is started either (NO_REPLY: not handed off):
+    core would otherwise log in to an unconfigured MAC with stored credentials.
     """
+    had_entry = async_tplink_entry_for_mac(hass, mac) is not None
     identity = await async_verify_identity(
         hass, host=host, mac=mac, device_id=device_id, owner_email=owner_email
     )
-    if identity is IdentityResult.VERIFIED:
-        async_request_host_update(hass, host=host, mac=mac)
+    if identity is not IdentityResult.VERIFIED:
+        return identity
+    if had_entry and async_tplink_entry_for_mac(hass, mac) is None:
+        return IdentityResult.NO_REPLY
+    async_request_host_update(hass, host=host, mac=mac)
     return identity
 
 

@@ -63,7 +63,8 @@ packet per address on UDP 20002) and never contacts TP-Link's cloud.
   email). Devices owned by another account are never offered and never receive your
   credentials.
 - **Upkeep:** a full sweep every 15 minutes (the same interval as core's own discovery)
-  onboards new devices. When a TP-Link Smart Home entry goes unavailable, its `/24` is
+  offers each new device as a card you confirm (after a restart the card asks for
+  your password, which is then kept in memory only). When a TP-Link Smart Home entry goes unavailable, its `/24` is
   re-probed within about a minute and, if the device answers at a new IP, core's DHCP
   flow updates the host.
 - **TPAP warning:** if one of your devices starts advertising TP-Link's newer TPAP

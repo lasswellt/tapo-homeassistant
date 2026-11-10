@@ -7,9 +7,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import importlib
+import json
 import ssl
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import patch
@@ -798,6 +801,27 @@ async def test_local_sweep_cancelled_shows_form_error(
     assert result["errors"] == {"base": "sweep_failed"}
 
 
+async def test_local_instant_sweep_failure_does_not_loop(
+    hass: HomeAssistant,
+) -> None:
+    calls = 0
+
+    async def _sweep(networks: list[str], *, query: bytes) -> list[TdpInfo]:
+        nonlocal calls
+        calls += 1
+        raise OSError
+
+    with (
+        patch("homeassistant.components.network.async_get_adapters", return_value=[]),
+        patch("custom_components.tapo_onboard.config_flow.async_sweep", _sweep),
+    ):
+        result = await _local_sweep(hass)
+        await hass.async_block_till_done()
+    assert calls == 1
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {"base": "sweep_failed"}
+
+
 async def test_local_sweep_raises_shows_form_error_then_retry_proceeds(
     hass: HomeAssistant,
 ) -> None:
@@ -939,7 +963,6 @@ async def test_discovery_confirm_adds_device(hass: HomeAssistant) -> None:
 @pytest.mark.parametrize(
     ("setup", "reason"),
     [
-        ("auth", "auth_failed"),
         ("mismatch", "identity_mismatch"),
         ("cannot_connect", "cannot_connect"),
         ("silent", "cannot_connect"),
@@ -949,10 +972,7 @@ async def test_discovery_confirm_failure_reasons(
     hass: HomeAssistant, setup: str, reason: str
 ) -> None:
     entry = _account(hass)
-    if setup == "auth":
-        StubTplinkFlow.connect_result = "auth"
-        StubTplinkFlow.valid_password = "other"
-    elif setup == "mismatch":
+    if setup == "mismatch":
         PROBE_AS["10.0.0.5"] = MAC_PARTIAL
     elif setup == "cannot_connect":
         StubTplinkFlow.connect_result = "cannot_connect"
@@ -980,18 +1000,173 @@ async def test_discovery_confirm_already_configured_outcome(
     assert onboard.call_args.kwargs["owner_email"] == EMAIL
 
 
-@pytest.mark.parametrize("case", ["missing", "unloaded", "no_password"])
-async def test_discovery_confirm_without_password_aborts(
+@pytest.mark.parametrize("case", ["missing", "unloaded"])
+async def test_discovery_account_not_running_aborts(
     hass: HomeAssistant, case: str
 ) -> None:
-    entry = _account(
-        hass, loaded=case != "unloaded", password=None if case == "no_password" else "x"
-    )
+    entry = _account(hass, loaded=case != "unloaded")
     result = await _discover(hass, "missing" if case == "missing" else entry.entry_id)
-    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert result["type"] == FlowResultType.FORM
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"password": PASSWORD}
+    )
     assert result["type"] == FlowResultType.ABORT
     assert result["reason"] == "password_needed"
     assert hass.config_entries.async_entries("tplink") == []
+
+
+async def test_discovery_card_after_restart_asks_password_and_remembers(
+    hass: HomeAssistant,
+) -> None:
+    entry = _account(hass, password=None)
+    result = await _discover(hass, entry.entry_id)
+    assert result["type"] == FlowResultType.FORM
+    schema = cast("vol.Schema", result["data_schema"]).schema
+    assert [str(k) for k in schema] == ["password"]
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"password": PASSWORD}
+    )
+    assert result["reason"] == "device_added"
+    assert entry.runtime_data.password == PASSWORD
+    assert entry.data == {
+        "username": EMAIL,
+        "mode": "local",
+        "subnets": ["10.0.0.0/24"],
+    }
+    second = await _discover(hass, entry.entry_id, mac=MAC_PARTIAL, host="10.0.0.6")
+    assert second["type"] == FlowResultType.FORM
+    assert second["data_schema"] is None
+
+
+async def test_discovery_card_wrong_password_reshows_form_without_dhcp_flow(
+    hass: HomeAssistant,
+) -> None:
+    entry = _account(hass, password=None)
+    StubTplinkFlow.connect_result = "auth"
+    StubTplinkFlow.valid_password = "right"
+    result = await _discover(hass, entry.entry_id)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"password": "wrong"}
+    )
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {"base": "invalid_auth"}
+    assert entry.runtime_data.password is None
+    await hass.async_block_till_done()
+    assert StubTplinkFlow.dhcp_infos == []
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"password": "right"}
+    )
+    assert result["reason"] == "device_added"
+    assert entry.runtime_data.password == "right"
+
+
+async def test_discovery_card_remembered_password_rejected_asks_again(
+    hass: HomeAssistant,
+) -> None:
+    entry = _account(hass)
+    StubTplinkFlow.connect_result = "auth"
+    StubTplinkFlow.valid_password = "right"
+    result = await _discover(hass, entry.entry_id)
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert result["errors"] == {"base": "invalid_auth"}
+    schema = cast("vol.Schema", result["data_schema"]).schema
+    assert [str(k) for k in schema] == ["password"]
+    assert StubTplinkFlow.dhcp_infos == []
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"password": "right"}
+    )
+    assert result["reason"] == "device_added"
+    assert entry.runtime_data.password == "right"
+
+
+async def test_discovery_confirm_password_lost_before_submit_asks_again(
+    hass: HomeAssistant,
+) -> None:
+    entry = _account(hass)
+    result = await _discover(hass, entry.entry_id)
+    entry.runtime_data.password = None
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {}
+    schema = cast("vol.Schema", result["data_schema"]).schema
+    assert [str(k) for k in schema] == ["password"]
+
+
+@pytest.mark.parametrize(
+    ("outcome", "reason"),
+    [
+        ("added", "device_added"),
+        ("already_configured", "already_configured"),
+        ("identity_mismatch", "identity_mismatch"),
+        ("handed_to_user", "handed_to_user"),
+        ("cannot_connect", "cannot_connect"),
+        ("unavailable", "tplink_unavailable"),
+        ("pending_confirmation", "pending_confirmation"),
+    ],
+)
+async def test_discovery_every_outcome_has_its_own_abort(
+    hass: HomeAssistant, outcome: str, reason: str
+) -> None:
+    OnboardOutcome = importlib.import_module(  # noqa: N806
+        "custom_components.tapo_onboard.onboarding"
+    ).OnboardOutcome
+    entry = _account(hass)
+    result = await _discover(hass, entry.entry_id)
+    with patch(
+        "custom_components.tapo_onboard.config_flow.async_onboard_device",
+        return_value=OnboardOutcome(outcome),
+    ) as onboard:
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == reason
+    assert onboard.call_args.kwargs["request_host_update"] is False
+    strings = json.loads(
+        (
+            Path(__file__).parents[2] / "custom_components/tapo_onboard/strings.json"
+        ).read_text()
+    )
+    assert reason in strings["config"]["abort"]
+
+
+async def test_discovery_model_is_sanitised(hass: HomeAssistant) -> None:
+    entry = _account(hass)
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": SOURCE_INTEGRATION_DISCOVERY},
+        data={
+            "host": "10.0.0.5",
+            "mac": STUB_MAC,
+            "model": "[click](https://evil.example)\n**P110**" + "x" * 80,
+            "entry_id": entry.entry_id,
+        },
+    )
+    model = result["description_placeholders"]["model"]
+    assert set(model) <= set(
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ._()/+-"
+    )
+    assert len(model) == 40
+    assert model.startswith("click(https//evil.example)P110")
+    flow = hass.config_entries.flow.async_get(result["flow_id"])
+    assert flow is not None
+    assert flow["context"]["title_placeholders"]["model"] == model
+
+
+async def test_discovery_empty_model_and_bad_host(hass: HomeAssistant) -> None:
+    entry = _account(hass)
+    info = {"host": "10.0.0.5", "mac": STUB_MAC, "entry_id": entry.entry_id}
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": SOURCE_INTEGRATION_DISCOVERY},
+        data={**info, "model": "<>*"},
+    )
+    assert result["description_placeholders"]["model"] == "Tapo device"
+    bad = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": SOURCE_INTEGRATION_DISCOVERY},
+        data={**info, "mac": MAC_PARTIAL, "host": "[x](y)", "model": "P110"},
+    )
+    assert bad["type"] == FlowResultType.ABORT
+    assert bad["reason"] == "cannot_connect"
 
 
 async def test_discovery_ignored_mac_aborts(hass: HomeAssistant) -> None:
