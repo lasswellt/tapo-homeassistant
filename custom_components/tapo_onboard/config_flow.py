@@ -102,7 +102,7 @@ _DISCOVERY_ABORTS = {
 _MOVED_ABORTS = {
     IdentityResult.VERIFIED: "device_moved",
     IdentityResult.MISMATCH: "identity_mismatch",
-    IdentityResult.NO_REPLY: "cannot_connect",
+    IdentityResult.NO_REPLY: "moved_no_reply",
 }
 
 _MODEL_UNSAFE = re.compile(r"[^A-Za-z0-9 ._()/+-]")
@@ -496,7 +496,9 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
         )
         self._abort_if_unique_id_configured(reload_on_update=False)
         has_entry = async_tplink_entry_for_mac(self.hass, mac) is not None
-        if has_entry != moved:
+        if moved and not has_entry:
+            return self.async_abort(reason="moved_entry_gone")
+        if has_entry and not moved:
             return self.async_abort(reason="already_configured")
         try:
             host = str(ip_address(str(discovery_info["host"])))

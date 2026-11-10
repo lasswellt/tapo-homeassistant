@@ -1266,7 +1266,7 @@ async def test_moved_confirm_hands_off_to_tplink(hass: HomeAssistant) -> None:
     ("host", "mismatch", "reason"),
     [
         ("10.0.0.5", True, "identity_mismatch"),
-        ("10.0.0.99", False, "cannot_connect"),
+        ("10.0.0.99", False, "moved_no_reply"),
     ],
 )
 async def test_moved_confirm_failure_reasons(
@@ -1287,7 +1287,7 @@ async def test_moved_card_without_tplink_entry_aborts(hass: HomeAssistant) -> No
     entry = _account(hass)
     result = await _moved(hass, entry.entry_id)
     assert result["type"] == FlowResultType.ABORT
-    assert result["reason"] == "already_configured"
+    assert result["reason"] == "moved_entry_gone"
 
 
 @pytest.mark.parametrize("case", ["missing", "unloaded"])

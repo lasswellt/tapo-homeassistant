@@ -109,7 +109,9 @@
       "handed_to_user": "The device needs a step only you can do. Open the card in TP-Link Smart Home to finish adding it.",
       "tplink_unavailable": "TP-Link Smart Home is not available, so the device could not be added. Check that the TP-Link integration is working, then try again.",
       "pending_confirmation": "The device is still waiting for your confirmation.",
-      "device_moved": "The device's TP-Link Smart Home entry was pointed to its new address."
+      "device_moved": "The device's TP-Link Smart Home entry was pointed to its new address.",
+      "moved_entry_gone": "The device's TP-Link Smart Home entry no longer exists, so there is nothing to update.",
+      "moved_no_reply": "The device did not answer at the new address. It will be offered again if it is found there later."
     },
     "create_entry": {
       "default": "Added: {added}. Needs your confirmation: {confirm}. Already configured: {already}. Failed: {failed}{failed_devices}."
