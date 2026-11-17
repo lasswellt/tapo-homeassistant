@@ -6,21 +6,38 @@
 
 from __future__ import annotations
 
+import re
+from datetime import datetime, timedelta
 from enum import StrEnum
+from typing import Final
 
-from homeassistant.config_entries import SOURCE_DHCP, SOURCE_USER, ConfigEntry
-from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_USERNAME
+from homeassistant.config_entries import (
+    SOURCE_DHCP,
+    SOURCE_INTEGRATION_DISCOVERY,
+    SOURCE_USER,
+    ConfigEntry,
+    ConfigEntryState,
+)
+from homeassistant.const import (
+    CONF_HOST,
+    CONF_PASSWORD,
+    CONF_USERNAME,
+    STATE_UNAVAILABLE,
+)
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import FlowResultType, UnknownHandler
 from homeassistant.exceptions import DependencyError
 from homeassistant.helpers import discovery_flow
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import format_mac
 from homeassistant.helpers.service_info.dhcp import DhcpServiceInfo
-from tapolink_proto.discovery import async_probe, build_query
+from homeassistant.util import dt as dt_util
+from tapolink_proto.discovery import TdpInfo, async_probe, build_query
 
 from .const import DOMAIN, LOGGER, TPLINK_DOMAIN
 
 _TDP_QUERY_KEY = "tdp_query"
+_BROKEN_STATES = frozenset({ConfigEntryState.SETUP_RETRY, ConfigEntryState.SETUP_ERROR})
 
 
 class OnboardOutcome(StrEnum):
@@ -34,6 +51,62 @@ class OnboardOutcome(StrEnum):
     UNAVAILABLE = "unavailable"
     IDENTITY_MISMATCH = "identity_mismatch"
     PENDING_CONFIRMATION = "pending_confirmation"
+
+
+# Outcomes after which a device is not offered or tried again.
+TERMINAL_OUTCOMES: Final = frozenset(
+    {
+        OnboardOutcome.ADDED,
+        OnboardOutcome.ALREADY_CONFIGURED,
+        OnboardOutcome.HANDED_TO_USER,
+        OnboardOutcome.AUTH_FAILED,
+        OnboardOutcome.IDENTITY_MISMATCH,
+    }
+)
+
+
+def _model_base(model: str | None) -> str:
+    """Strip a region suffix: "S310D(US)" -> "S310D"."""
+    return (model or "").split("(", 1)[0].strip()
+
+
+_MODEL_UNSAFE = re.compile(r"[^A-Za-z0-9 ._()/+-]")
+MAX_MODEL_LENGTH = 40
+
+
+def safe_model(model: str | None) -> str:
+    """Return a model name that is safe to show in a card or repair.
+
+    The TDP reply is unauthenticated, so anything outside a plain model
+    charset (markdown, links) is dropped and the length is capped.
+    """
+    cleaned = _MODEL_UNSAFE.sub("", model or "")
+    return cleaned[:MAX_MODEL_LENGTH].strip() or "Tapo device"
+
+
+def is_lost(hass: HomeAssistant, tplink_entry: ConfigEntry) -> bool:
+    """Return True when the `tplink` entry cannot reach its device.
+
+    Failed setup counts as lost; a loaded entry is lost when it has enabled
+    entities and every one is unavailable.
+    """
+    if tplink_entry.state in _BROKEN_STATES:
+        return True
+    if tplink_entry.state is not ConfigEntryState.LOADED:
+        return False
+    registry = er.async_get(hass)
+    entity_ids = [
+        ent.entity_id
+        for ent in er.async_entries_for_config_entry(registry, tplink_entry.entry_id)
+        if ent.disabled_by is None
+    ]
+    if not entity_ids:
+        return False
+    for entity_id in entity_ids:
+        state = hass.states.get(entity_id)
+        if state is None or state.state != STATE_UNAVAILABLE:
+            return False
+    return True
 
 
 class IdentityResult(StrEnum):
@@ -60,6 +133,15 @@ def _require_one_claim(device_id: str | None, owner_email: str | None) -> None:
         raise ValueError("exactly one of device_id and owner_email is required")
 
 
+async def async_probe_info(hass: HomeAssistant, host: str) -> TdpInfo | None:
+    """Unicast-probe `host`; None when it is silent or the probe fails."""
+    try:
+        return await async_probe(host, query=await async_get_tdp_query(hass))
+    except Exception as exc:  # noqa: BLE001 - one host must not stop the caller
+        LOGGER.debug("probe failed: %s", type(exc).__name__)
+        return None
+
+
 async def async_verify_identity(
     hass: HomeAssistant,
     *,
@@ -78,11 +160,7 @@ async def async_verify_identity(
     A probe that fails unexpectedly counts as NO_REPLY: the host stays unverified.
     """
     _require_one_claim(device_id, owner_email)
-    try:
-        info = await async_probe(host, query=await async_get_tdp_query(hass))
-    except Exception as exc:  # noqa: BLE001 - one host must not stop the caller
-        LOGGER.debug("identity probe for %s failed: %s", mac, type(exc).__name__)
-        return IdentityResult.NO_REPLY
+    info = await async_probe_info(hass, host)
     if info is None:
         return IdentityResult.NO_REPLY
     claim_ok = (device_id is not None and info.matches_cloud_device(device_id)) or (
@@ -209,3 +287,65 @@ async def async_onboard_device(
         return OnboardOutcome.CANNOT_CONNECT
     async_request_host_update(hass, host=host, mac=mac)
     return OnboardOutcome.HANDED_TO_USER
+
+
+class MovedCards:
+    """Offers one "moved" card per lost device, re-offered once per interval."""
+
+    def __init__(self, interval: timedelta) -> None:
+        """Offer an unanswered card again after `interval`."""
+        self._interval = interval
+        # MAC -> (address, time) of the last card offered in the current lost episode.
+        self._offered: dict[str, tuple[str, datetime]] = {}
+
+    @callback
+    def async_offer(
+        self,
+        hass: HomeAssistant,
+        *,
+        mac: str,
+        ip: str,
+        model: str | None,
+        entry_id: str,
+        device_id: str | None = None,
+    ) -> None:
+        """Start the card unless this address was offered and is still pending.
+
+        A new address is offered at once; an unanswered card is offered again
+        once per interval, never while one is open.
+        """
+        key = format_mac(mac)
+        now = dt_util.utcnow()
+        offered = self._offered.get(key)
+        if (
+            offered is not None
+            and offered[0] == ip
+            and (
+                now - offered[1] < self._interval
+                or hass.config_entries.flow.async_progress_by_handler(
+                    DOMAIN, match_context={"unique_id": f"moved-{key}-{ip}"}
+                )
+            )
+        ):
+            return
+        self._offered[key] = (ip, now)
+        data: dict[str, str] = {
+            "kind": "moved",
+            "host": ip,
+            "mac": mac,
+            "model": safe_model(_model_base(model)),
+            "entry_id": entry_id,
+        }
+        if device_id is not None:
+            data["device_id"] = device_id
+        discovery_flow.async_create_flow(
+            hass, DOMAIN, {"source": SOURCE_INTEGRATION_DISCOVERY}, data
+        )
+
+    @callback
+    def prune(self, hass: HomeAssistant) -> None:
+        """Forget every MAC whose `tplink` entry is gone or no longer lost."""
+        for mac in list(self._offered):
+            entry = async_tplink_entry_for_mac(hass, mac)
+            if entry is None or not is_lost(hass, entry):
+                del self._offered[mac]

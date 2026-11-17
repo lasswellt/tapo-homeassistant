@@ -712,7 +712,7 @@ async def test_moved_card_once_per_lost_episode(
         hass.states.async_set(ent_id, "on")
         udp.replies = [_info(ip="192.168.1.1", scheme="AES")]
         await coord.async_refresh()
-        assert coord._moved_cards == {}
+        assert coord._cards._offered == {}
         hass.states.async_set(ent_id, STATE_UNAVAILABLE)
         udp.replies = [_info(ip="192.168.1.9", scheme="AES")]
         await coord.async_refresh()
@@ -726,10 +726,10 @@ async def test_moved_card_marker_dropped_when_entry_removed(
     udp.replies = [_info(ip="192.168.1.9", scheme="AES")]
     coord = _coord(hass, _entry(hass))
     await coord.async_refresh()
-    assert list(coord._moved_cards) == [STUB_MAC]
+    assert list(coord._cards._offered) == [STUB_MAC]
     await hass.config_entries.async_remove(tp.entry_id)
-    coord._prune_moved_cards()
-    assert coord._moved_cards == {}
+    coord._cards.prune(hass)
+    assert coord._cards._offered == {}
 
 
 async def test_lost_check_moved_klap_auto_repoints(

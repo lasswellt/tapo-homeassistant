@@ -371,3 +371,141 @@ async def test_claim_arguments_exactly_one(
         await onb.async_onboard_device(
             hass, host=HOST, mac=STUB_MAC, username="u", password="p"
         )
+
+
+async def test_terminal_outcomes(onb: ModuleType) -> None:
+    outcome = onb.OnboardOutcome
+    assert onb.TERMINAL_OUTCOMES == {
+        outcome.ADDED,
+        outcome.ALREADY_CONFIGURED,
+        outcome.HANDED_TO_USER,
+        outcome.AUTH_FAILED,
+        outcome.IDENTITY_MISMATCH,
+    }
+
+
+async def test_is_lost_unknown_states(hass: HomeAssistant, onb: ModuleType) -> None:
+    from homeassistant.config_entries import ConfigEntryState
+
+    entry = MockConfigEntry(domain="tplink", unique_id=STUB_MAC)
+    entry.add_to_hass(hass)
+    assert onb.is_lost(hass, entry) is False
+    entry.mock_state(hass, ConfigEntryState.SETUP_RETRY)
+    assert onb.is_lost(hass, entry) is True
+    entry.mock_state(hass, ConfigEntryState.LOADED)
+    assert onb.is_lost(hass, entry) is False  # no enabled entities
+    entry.mock_state(hass, ConfigEntryState.NOT_LOADED)
+
+
+async def test_probe_info_reply(hass: HomeAssistant, onb: ModuleType) -> None:
+    info = await onb.async_probe_info(hass, HOST)
+    assert info is not None
+    assert info.matches_mac(STUB_MAC)
+
+
+async def test_probe_info_silent_and_failing(
+    hass: HomeAssistant, onb: ModuleType
+) -> None:
+    async def _silent(host: str, *, query: bytes, **_: object) -> None:
+        return None
+
+    async def _boom(host: str, *, query: bytes, **_: object) -> None:
+        raise OSError("down")
+
+    with patch("custom_components.tapo_onboard.onboarding.async_probe", _silent):
+        assert await onb.async_probe_info(hass, HOST) is None
+    with patch("custom_components.tapo_onboard.onboarding.async_probe", _boom):
+        assert await onb.async_probe_info(hass, HOST) is None
+
+
+def _offer(
+    onb: ModuleType,
+    hass: HomeAssistant,
+    cards: object,
+    ip: str,
+    device_id: str | None = None,
+) -> None:
+    cards.async_offer(  # type: ignore[attr-defined]
+        hass,
+        mac=STUB_MAC,
+        ip=ip,
+        model="S310D(US) [x](y)",
+        entry_id="eid",
+        device_id=device_id,
+    )
+
+
+async def test_moved_cards_offer_rules(hass: HomeAssistant, onb: ModuleType) -> None:
+    from datetime import timedelta
+
+    from homeassistant.util import dt as dt_util
+
+    cards = onb.MovedCards(timedelta(minutes=15))
+    with patch.object(onb.discovery_flow, "async_create_flow") as create:
+        _offer(onb, hass, cards, "192.168.1.60")
+        assert create.call_count == 1
+        data = create.call_args.args[3]
+        assert data["kind"] == "moved"
+        assert data["model"] == "S310D"
+        assert data["entry_id"] == "eid"
+        assert "device_id" not in data
+        _offer(onb, hass, cards, "192.168.1.60")
+        assert create.call_count == 1
+        _offer(onb, hass, cards, "192.168.1.61", device_id="dev")
+        assert create.call_count == 2
+        assert create.call_args.args[3]["device_id"] == "dev"
+        with patch.object(
+            dt_util, "utcnow", return_value=dt_util.utcnow() + timedelta(minutes=16)
+        ):
+            _offer(onb, hass, cards, "192.168.1.61")
+        assert create.call_count == 3
+
+
+async def test_moved_cards_no_reoffer_while_flow_open(
+    hass: HomeAssistant, onb: ModuleType
+) -> None:
+    from datetime import timedelta
+
+    from homeassistant.util import dt as dt_util
+
+    cards = onb.MovedCards(timedelta(minutes=15))
+    later = dt_util.utcnow() + timedelta(minutes=16)
+    with (
+        patch.object(onb.discovery_flow, "async_create_flow") as create,
+        patch.object(
+            hass.config_entries.flow,
+            "async_progress_by_handler",
+            return_value=[{"flow_id": "open"}],
+        ),
+    ):
+        _offer(onb, hass, cards, "192.168.1.60")
+        with patch.object(dt_util, "utcnow", return_value=later):
+            _offer(onb, hass, cards, "192.168.1.60")
+        assert create.call_count == 1
+
+
+async def test_moved_cards_prune(
+    hass: HomeAssistant, onb: ModuleType, stub: type[StubTplinkFlow]
+) -> None:
+    from datetime import timedelta
+
+    from homeassistant.config_entries import ConfigEntryState
+
+    cards = onb.MovedCards(timedelta(minutes=15))
+    entry = MockConfigEntry(domain="tplink", unique_id=STUB_MAC)
+    entry.add_to_hass(hass)
+    entry.mock_state(hass, ConfigEntryState.SETUP_RETRY)
+    with patch.object(onb.discovery_flow, "async_create_flow") as create:
+        _offer(onb, hass, cards, "192.168.1.60")
+        cards.prune(hass)
+        _offer(onb, hass, cards, "192.168.1.60")
+        assert create.call_count == 1  # still lost: kept
+        entry.mock_state(hass, ConfigEntryState.LOADED)
+        cards.prune(hass)
+        _offer(onb, hass, cards, "192.168.1.60")
+        assert create.call_count == 2  # recovered: forgotten
+        entry.mock_state(hass, ConfigEntryState.NOT_LOADED)
+        await hass.config_entries.async_remove(entry.entry_id)
+        cards.prune(hass)
+        _offer(onb, hass, cards, "192.168.1.60")
+        assert create.call_count == 3  # removed: forgotten

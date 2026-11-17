@@ -12,22 +12,15 @@ owner hash is public, so the user confirms each new device first.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from ipaddress import IPv4Network
 from typing import Final
 
-from homeassistant.config_entries import (
-    SOURCE_INTEGRATION_DISCOVERY,
-    ConfigEntry,
-    ConfigEntryState,
-)
-from homeassistant.const import STATE_UNAVAILABLE
+from homeassistant.config_entries import SOURCE_INTEGRATION_DISCOVERY, ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import discovery_flow
-from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.device_registry import format_mac
 from homeassistant.helpers.event import async_track_time_interval
@@ -51,19 +44,26 @@ from .const import (
     TPLINK_DOMAIN,
     UNSUPPORTED_IN_CORE_MODELS,
 )
-from .coordinator import _TERMINAL, FlowResult
+from .coordinator import FlowResult
 from .onboarding import (
+    TERMINAL_OUTCOMES,
     IdentityResult,
+    MovedCards,
     OnboardOutcome,
     async_get_tdp_query,
     async_hand_off_if_verified,
     async_tplink_entry_for_mac,
+    is_lost,
+)
+from .onboarding import (
+    _model_base as _model_base,
+)
+from .onboarding import (
+    safe_model as safe_model,
 )
 
 # Minimum gap between targeted sweeps of the same subnet.
 TARGETED_SWEEP_FLOOR: Final = timedelta(seconds=60)
-
-_BROKEN_STATES = frozenset({ConfigEntryState.SETUP_RETRY, ConfigEntryState.SETUP_ERROR})
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,50 +82,6 @@ class SweepState:
 def advertises_tpap(info: TdpInfo) -> bool:
     """Return True when the TDP reply shows the TPAP login scheme."""
     return (info.encrypt_type or "").upper() == "TPAP" or bool(info.tpap)
-
-
-def _model_base(model: str | None) -> str:
-    """Strip a region suffix: "S310D(US)" -> "S310D"."""
-    return (model or "").split("(", 1)[0].strip()
-
-
-_MODEL_UNSAFE = re.compile(r"[^A-Za-z0-9 ._()/+-]")
-MAX_MODEL_LENGTH = 40
-
-
-def safe_model(model: str | None) -> str:
-    """Return a model name that is safe to show in a card or repair.
-
-    The TDP reply is unauthenticated, so anything outside a plain model
-    charset (markdown, links) is dropped and the length is capped.
-    """
-    cleaned = _MODEL_UNSAFE.sub("", model or "")
-    return cleaned[:MAX_MODEL_LENGTH].strip() or "Tapo device"
-
-
-def is_lost(hass: HomeAssistant, tplink_entry: ConfigEntry) -> bool:
-    """Return True when the `tplink` entry cannot reach its device.
-
-    Failed setup counts as lost; a loaded entry is lost when it has enabled
-    entities and every one is unavailable.
-    """
-    if tplink_entry.state in _BROKEN_STATES:
-        return True
-    if tplink_entry.state is not ConfigEntryState.LOADED:
-        return False
-    registry = er.async_get(hass)
-    entity_ids = [
-        ent.entity_id
-        for ent in er.async_entries_for_config_entry(registry, tplink_entry.entry_id)
-        if ent.disabled_by is None
-    ]
-    if not entity_ids:
-        return False
-    for entity_id in entity_ids:
-        state = hass.states.get(entity_id)
-        if state is None or state.state != STATE_UNAVAILABLE:
-            return False
-    return True
 
 
 class SweepCoordinator(DataUpdateCoordinator[SweepState]):
@@ -157,12 +113,10 @@ class SweepCoordinator(DataUpdateCoordinator[SweepState]):
         self._last_targeted: dict[IPv4Network, datetime] = {}
         # MAC -> login scheme the device showed while healthy at its known host.
         self._schemes: dict[str, str | None] = {}
-        # MAC -> (address, time) of the last "moved" card offered in the current
-        # lost episode.
-        self._moved_cards: dict[str, tuple[str, datetime]] = {}
+        self._cards = MovedCards(SWEEP_INTERVAL)
         if flow_result is not None:
             self._attempted.update(
-                mac for mac, o in flow_result.outcomes.items() if o in _TERMINAL
+                mac for mac, o in flow_result.outcomes.items() if o in TERMINAL_OUTCOMES
             )
 
     def sweep_networks(self) -> tuple[IPv4Network, ...]:
@@ -200,14 +154,6 @@ class SweepCoordinator(DataUpdateCoordinator[SweepState]):
                 info.encrypt_type or ""
             ).upper() or None
 
-    @callback
-    def _prune_moved_cards(self) -> None:
-        """Forget the card marker of every entry that is no longer lost."""
-        for mac in list(self._moved_cards):
-            entry = async_tplink_entry_for_mac(self.hass, mac)
-            if entry is None or not is_lost(self.hass, entry):
-                del self._moved_cards[mac]
-
     async def _async_handle_moved(self, info: TdpInfo) -> bool:
         """Re-point a lost entry whose device answers elsewhere.
 
@@ -226,34 +172,13 @@ class SweepCoordinator(DataUpdateCoordinator[SweepState]):
                 self.hass, host=info.ip, mac=info.mac, owner_email=self._username
             )
             return identity is IdentityResult.VERIFIED
-        unique_id = f"moved-{mac}-{info.ip}"
-        now = dt_util.utcnow()
-        offered = self._moved_cards.get(mac)
-        # Re-offer a card nobody answered once per sweep interval, never while
-        # one is open; a new address is offered at once.
-        if (
-            offered is None
-            or offered[0] != info.ip
-            or (
-                now - offered[1] >= SWEEP_INTERVAL
-                and not self.hass.config_entries.flow.async_progress_by_handler(
-                    DOMAIN, match_context={"unique_id": unique_id}
-                )
-            )
-        ):
-            self._moved_cards[mac] = (info.ip, now)
-            discovery_flow.async_create_flow(
-                self.hass,
-                DOMAIN,
-                {"source": SOURCE_INTEGRATION_DISCOVERY},
-                {
-                    "kind": "moved",
-                    "host": info.ip,
-                    "mac": info.mac,
-                    "model": safe_model(_model_base(info.device_model)),
-                    "entry_id": self._entry.entry_id,
-                },
-            )
+        self._cards.async_offer(
+            self.hass,
+            mac=info.mac,
+            ip=info.ip,
+            model=info.device_model,
+            entry_id=self._entry.entry_id,
+        )
         return False
 
     @callback
@@ -267,7 +192,7 @@ class SweepCoordinator(DataUpdateCoordinator[SweepState]):
 
     async def _async_check_lost(self, _now: datetime | None = None) -> None:
         """Sweep the subnet of each lost `tplink` entry, at most once per floor."""
-        self._prune_moved_cards()
+        self._cards.prune(self.hass)
         by_subnet: dict[IPv4Network, list[tuple[str, str]]] = {}
         for tp in self.hass.config_entries.async_entries(TPLINK_DOMAIN):
             host = tp.data.get("host")
@@ -350,7 +275,7 @@ class SweepCoordinator(DataUpdateCoordinator[SweepState]):
         host_updates: list[str] = []
         ignored = set(self._entry.data.get(CONF_IGNORED_MACS, []))
 
-        self._prune_moved_cards()
+        self._cards.prune(self.hass)
         for mac, info in owned.items():
             assert info.ip is not None  # noqa: S101 - filtered above
             self._record_scheme(info)
