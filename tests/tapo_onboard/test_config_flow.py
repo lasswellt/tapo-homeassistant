@@ -79,6 +79,7 @@ HOSTS = {
 MAC_BY_HOST = {host: mac for mac, host in HOSTS.items()}
 # host -> MAC whose identity the fake probe reports instead of the owner's.
 PROBE_AS: dict[str, str] = {}
+OWNER_AS: dict[str, str] = {}
 
 DEVICES = [
     _dev(STUB_MAC, "Alpha", "P110"),
@@ -155,6 +156,7 @@ class FakeCloudClient:
 @pytest.fixture(autouse=True)
 def probe() -> Iterator[None]:
     PROBE_AS.clear()
+    OWNER_AS.clear()
 
     async def _fake(host: str, *, query: bytes, **_: object) -> TdpInfo | None:
         owner = MAC_BY_HOST.get(host)
@@ -164,7 +166,9 @@ def probe() -> Iterator[None]:
         return TdpInfo.from_result(
             {
                 "device_id": hashlib.md5(f"id-{mac}".encode()).hexdigest().upper(),
-                "owner": hashlib.md5(EMAIL.lower().encode()).hexdigest().upper(),
+                "owner": hashlib.md5(OWNER_AS.get(host, EMAIL).lower().encode())
+                .hexdigest()
+                .upper(),
                 "mac": mac,
             }  # noqa: S324
         )
@@ -1212,7 +1216,9 @@ async def _moved(
     entry_id: str,
     mac: str = STUB_MAC,
     host: str = "10.0.0.5",
+    device_id: str | None = None,
 ) -> ConfigFlowResult:
+    extra = {} if device_id is None else {"device_id": device_id}
     return await hass.config_entries.flow.async_init(
         DOMAIN,
         context={"source": SOURCE_INTEGRATION_DISCOVERY},
@@ -1222,6 +1228,7 @@ async def _moved(
             "mac": mac,
             "model": "P110",
             "entry_id": entry_id,
+            **extra,
         },
     )
 
@@ -1278,6 +1285,29 @@ async def test_moved_confirm_hands_off_to_tplink(hass: HomeAssistant) -> None:
     assert result["reason"] == "device_moved"
     assert tp.data["host"] == "10.0.0.5"
     assert [i.ip for i in StubTplinkFlow.dhcp_infos] == ["10.0.0.5"]
+
+
+@pytest.mark.parametrize(
+    ("claimed", "reason"),
+    [
+        (f"id-{STUB_MAC}", "device_moved"),
+        ("id-someone-else", "identity_mismatch"),
+    ],
+)
+async def test_moved_confirm_cloud_device_id_claim_ignores_owner(
+    hass: HomeAssistant, claimed: str, reason: str
+) -> None:
+    entry = _account(hass)
+    _lost_tplink(hass)
+    OWNER_AS["10.0.0.5"] = "sharer@example.com"  # shared device: sharer's hash
+    result = await _moved(hass, entry.entry_id, device_id=claimed)
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    await hass.async_block_till_done()
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == reason
+    assert [i.ip for i in StubTplinkFlow.dhcp_infos] == (
+        ["10.0.0.5"] if reason == "device_moved" else []
+    )
 
 
 @pytest.mark.parametrize(

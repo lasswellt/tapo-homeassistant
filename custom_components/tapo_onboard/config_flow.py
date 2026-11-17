@@ -165,6 +165,7 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
         self._task: asyncio.Task[None] | None = None
         self._reauth = False
         self._discovered: dict[str, str] = {}
+        self._device_id: str | None = None
         self._ask_password = False
         self._sweep_failed = False
         self._password_rejected = False
@@ -510,6 +511,10 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
             "model": model,
             "entry_id": str(discovery_info["entry_id"]),
         }
+        claimed_id = discovery_info.get("device_id")
+        self._device_id = (
+            claimed_id if moved and isinstance(claimed_id, str) and claimed_id else None
+        )
         self.context["title_placeholders"] = {"model": model, "host": host}
         if moved:
             return await self.async_step_moved_confirm()
@@ -537,7 +542,8 @@ class TapoOnboardConfigFlow(ConfigFlow, domain=DOMAIN):
             self.hass,
             host=self._discovered["host"],
             mac=self._discovered["mac"],
-            owner_email=str(account.data[CONF_USERNAME]),
+            device_id=self._device_id,
+            owner_email=(None if self._device_id else str(account.data[CONF_USERNAME])),
         )
         return self.async_abort(reason=_MOVED_ABORTS[identity])
 
