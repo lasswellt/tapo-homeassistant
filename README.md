@@ -150,10 +150,11 @@ Contract drift against core is checked by `tools/check_core_tplink_contract.sh`.
 
 ## Status
 
-Phase 1a is released (latest v0.1.2): `tapo_onboard` and `tapolink-proto` (a cloud-only
-library). It was verified on Home Assistant 2026.10.4 with real devices on
-2026-11-01: 19 of 20 selected devices were onboarded without typing an IP, and the
-one failure was a bulb that was offline. Recovering a device that moved IP is covered
+Phase 1a is released (latest v0.2.0): `tapo_onboard` and `tapolink-proto`. v0.2.0
+adds local mode (a unicast TDP sweep, no cloud account), which is covered by tests but
+not yet verified on hardware. Cloud mode was verified on Home Assistant 2026.10.4
+with real devices on 2026-11-01: 19 of 20 selected devices were onboarded without
+typing an IP, and the one failure was a bulb that was offline. Recovering a device that moved IP is covered
 by tests but has not been observed on hardware. The full `tapolink` integration is
 still a design, with **no public release before TPAP support**: without it, most
 current Tapo plugs would not connect.
