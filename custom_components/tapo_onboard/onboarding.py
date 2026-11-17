@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -118,13 +119,23 @@ class IdentityResult(StrEnum):
 
 
 async def async_get_tdp_query(hass: HomeAssistant) -> bytes:
-    """Return the TDP probe packet, building it once (RSA keygen) per hass."""
+    """Return the TDP probe packet, building it once (RSA keygen) per hass.
+
+    Callers that arrive while the build runs share it; a failed build is not
+    kept, so the next caller tries again.
+    """
     store = hass.data.setdefault(DOMAIN, {})
-    query: bytes | None = store.get(_TDP_QUERY_KEY)
-    if query is None:
-        query = await hass.async_add_executor_job(build_query)
-        store[_TDP_QUERY_KEY] = query
-    return query
+    pending: asyncio.Future[bytes] | None = store.get(_TDP_QUERY_KEY)
+    if pending is None:
+        pending = hass.async_add_executor_job(build_query)
+        store[_TDP_QUERY_KEY] = pending
+    try:
+        # Shielded: one cancelled caller must not cancel the shared build.
+        return await asyncio.shield(pending)
+    except Exception:
+        if store.get(_TDP_QUERY_KEY) is pending:
+            del store[_TDP_QUERY_KEY]
+        raise
 
 
 def _require_one_claim(device_id: str | None, owner_email: str | None) -> None:

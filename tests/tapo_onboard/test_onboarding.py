@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import importlib
+import threading
 from collections.abc import Iterator
 from contextlib import AbstractContextManager
 from types import ModuleType
@@ -239,6 +241,44 @@ async def test_tdp_query_built_once(hass: HomeAssistant, onb: ModuleType) -> Non
         assert await onb.async_get_tdp_query(hass) == b"query"
         assert await onb.async_get_tdp_query(hass) == b"query"
     assert len(calls) == 1
+
+
+async def test_tdp_query_concurrent_callers_share_one_build(
+    hass: HomeAssistant, onb: ModuleType
+) -> None:
+    calls: list[int] = []
+    release = threading.Event()
+
+    def _build() -> bytes:
+        calls.append(1)
+        release.wait(5)
+        return b"query"
+
+    with patch("custom_components.tapo_onboard.onboarding.build_query", _build):
+        waiters = [
+            asyncio.ensure_future(onb.async_get_tdp_query(hass)) for _ in range(5)
+        ]
+        await asyncio.sleep(0)
+        release.set()
+        assert await asyncio.gather(*waiters) == [b"query"] * 5
+    assert len(calls) == 1
+
+
+async def test_tdp_query_failed_build_is_retried(
+    hass: HomeAssistant, onb: ModuleType
+) -> None:
+    results: list[bytes | Exception] = [OSError("no entropy"), b"query"]
+
+    def _build() -> bytes:
+        result = results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    with patch("custom_components.tapo_onboard.onboarding.build_query", _build):
+        with pytest.raises(OSError):
+            await onb.async_get_tdp_query(hass)
+        assert await onb.async_get_tdp_query(hass) == b"query"
 
 
 OWNER = "Me@Example.com"
