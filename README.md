@@ -213,11 +213,16 @@ failures, so pick one per device.
 
 ## Security posture
 
-- **Moved devices.** In local mode a device that changed address is updated
-  automatically only if it uses KLAP (which proves the device knows your credentials
-  before anything is sent); other devices show a "moved" card to confirm. A host
-  faking a moved KLAP device can make that entry need re-authentication, but learns
-  no secret.
+- **Moved devices.** The KLAP rule applies in local mode and cloud mode: a device that
+  changed address is updated automatically only if it used KLAP while it was healthy
+  and still answers KLAP (which proves the device knows your credentials before anything is sent). In
+  every other case, including a device lost before it was seen healthy, a "moved"
+  card asks you first. A host faking a moved KLAP device can make that entry need
+  re-authentication, but learns no secret.
+- **New devices in cloud mode are added automatically.** Cloud mode sends your password
+  to the cloud-listed IP after a probe that only proves the reply came from that IP.
+  For AES-scheme devices, a host on your LAN holding that IP could receive the
+  password. A dedicated TP-Link account limits the damage.
 - **Core keeps the password too.** Core TP-Link Smart Home keeps the password in memory
   after any successful login, and its own discovery on Home Assistant's network tries it
   on new devices it finds (core behaviour, also when you add a device by hand).

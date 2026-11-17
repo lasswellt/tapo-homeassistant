@@ -22,7 +22,11 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import format_mac
 from homeassistant.util import dt as dt_util
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
+    MockModule,
+    mock_integration,
+)
 from stub_tplink import STUB_MAC, StubTplinkFlow, stub_tplink
 from tapolink_proto.cloud import (
     AppVersionTooOld,
@@ -97,10 +101,22 @@ class FakeCloudClient:
         return self.refreshed
 
 
-def _tdp(cloud_id: str, mac: str = STUB_MAC) -> TdpInfo:
-    info = TdpInfo.from_result(
-        {"device_id": hashlib.md5(cloud_id.encode()).hexdigest().upper(), "mac": mac}  # noqa: S324
-    )
+def _tdp(
+    cloud_id: str,
+    mac: str = STUB_MAC,
+    *,
+    ip: str | None = None,
+    scheme: str | None = None,
+) -> TdpInfo:
+    result: dict[str, Any] = {
+        "device_id": hashlib.md5(cloud_id.encode()).hexdigest().upper(),  # noqa: S324
+        "mac": mac,
+    }
+    if ip is not None:
+        result["ip"] = ip
+    if scheme is not None:
+        result["mgt_encrypt_schm"] = {"encrypt_type": scheme}
+    info = TdpInfo.from_result(result)
     assert info is not None
     return info
 
@@ -116,6 +132,9 @@ def probe() -> Iterator[None]:
 
 @pytest.fixture
 def stub(hass: HomeAssistant) -> Iterator[type[StubTplinkFlow]]:
+    # The manifest depends on core `dhcp`/`network`, whose extras are not installed.
+    mock_integration(hass, MockModule("dhcp"))
+    mock_integration(hass, MockModule("network"))
     with stub_tplink(hass) as flow:
         yield flow
 
@@ -174,13 +193,36 @@ async def test_healthy_entry_no_details(
     assert client.details_calls == []
 
 
+def _by_host(replies: dict[str, TdpInfo | None]) -> AbstractContextManager[object]:
+    async def _fake(host: str, *, query: bytes, **_: object) -> TdpInfo | None:
+        return replies.get(host)
+
+    return patch("custom_components.tapo_onboard.onboarding.async_probe", _fake)
+
+
+async def _record_klap(
+    coord: InventoryCoordinator,
+    hass: HomeAssistant,
+    tp: MockConfigEntry,
+    scheme: str | None = "KLAP",
+) -> None:
+    """Run one cycle with the healthy entry answering `scheme` at its host."""
+    host = tp.data["host"]
+    with _by_host({host: _tdp(f"id-{STUB_MAC}", ip=host, scheme=scheme)}):
+        await coord.async_refresh()
+    await hass.async_block_till_done()
+
+
 async def test_setup_retry_ip_repair(
     hass: HomeAssistant, mod: ModuleType, stub: type[StubTplinkFlow]
 ) -> None:
-    tp = _tplink(hass, ConfigEntryState.SETUP_RETRY)
+    tp = _tplink(hass, ConfigEntryState.LOADED)
     client = FakeCloudClient([_device(STUB_MAC)], {STUB_MAC: "10.0.0.9"})
     coord = _coord(mod, hass, _entry(hass), client)
-    await coord.async_refresh()
+    await _record_klap(coord, hass, tp)
+    tp.mock_state(hass, ConfigEntryState.SETUP_RETRY)
+    with _probe_returns(_tdp(f"id-{STUB_MAC}", ip="10.0.0.9", scheme="KLAP")):
+        await coord.async_refresh()
     await hass.async_block_till_done()
     assert client.details_calls == [STUB_MAC]
     assert coord.data.host_updates == (STUB_MAC,)
@@ -221,12 +263,18 @@ async def test_loaded_entry_all_unavailable_repaired(
     hass: HomeAssistant, mod: ModuleType, stub: type[StubTplinkFlow]
 ) -> None:
     tp = _tplink(hass, ConfigEntryState.LOADED)
-    _entity(hass, tp, "a", STATE_UNAVAILABLE)
-    _entity(hass, tp, "b", STATE_UNAVAILABLE)
+    _entity(hass, tp, "a", STATE_ON)
+    _entity(hass, tp, "b", STATE_ON)
     _entity(hass, tp, "c", None, disabled=True)
     client = FakeCloudClient([_device(STUB_MAC)], {STUB_MAC: "10.0.0.9"})
     coord = _coord(mod, hass, _entry(hass), client)
-    await coord.async_refresh()
+    await _record_klap(coord, hass, tp)
+    for key in ("a", "b"):
+        entity_id = er.async_get(hass).async_get_entity_id("switch", "tplink", key)
+        assert entity_id is not None
+        hass.states.async_set(entity_id, STATE_UNAVAILABLE)
+    with _probe_returns(_tdp(f"id-{STUB_MAC}", ip="10.0.0.9", scheme="KLAP")):
+        await coord.async_refresh()
     await hass.async_block_till_done()
     assert client.details_calls == [STUB_MAC]
     assert coord.data.host_updates == (STUB_MAC,)
@@ -433,13 +481,112 @@ def _probe_returns(info: TdpInfo | None) -> AbstractContextManager[object]:
 async def test_ip_repair_verified_updates_host(
     hass: HomeAssistant, mod: ModuleType, stub: type[StubTplinkFlow]
 ) -> None:
-    tp = _tplink(hass, ConfigEntryState.SETUP_RETRY)
+    tp = _tplink(hass, ConfigEntryState.LOADED)
     client = FakeCloudClient([_device(STUB_MAC)], {STUB_MAC: "10.0.0.9"})
-    with _probe_returns(_tdp(f"id-{STUB_MAC}")):
-        state = await _coord(mod, hass, _entry(hass), client)._async_update_data()
+    coord = _coord(mod, hass, _entry(hass), client)
+    await _record_klap(coord, hass, tp)
+    tp.mock_state(hass, ConfigEntryState.SETUP_RETRY)
+    with _probe_returns(_tdp(f"id-{STUB_MAC}", ip="10.0.0.9", scheme="klap")):
+        state = await coord._async_update_data()
     await hass.async_block_till_done()
     assert state.host_updates == (STUB_MAC,)
     assert tp.data["host"] == "10.0.0.9"
+
+
+@pytest.mark.parametrize(
+    ("recorded", "reply"),
+    [
+        (rec, rep)
+        for rec in (None, "AES", "KLAP")
+        for rep in ("AES", "KLAP", "TPAP", None)
+        if (rec, rep) != ("KLAP", "KLAP")
+    ],
+)
+async def test_ip_repair_not_klap_offers_card(
+    hass: HomeAssistant,
+    mod: ModuleType,
+    stub: type[StubTplinkFlow],
+    recorded: str | None,
+    reply: str | None,
+) -> None:
+    tp = _tplink(hass, ConfigEntryState.LOADED)
+    client = FakeCloudClient([_device(STUB_MAC)], {STUB_MAC: "10.0.0.9"})
+    coord = _coord(mod, hass, _entry(hass), client)
+    await _record_klap(coord, hass, tp, recorded)
+    tp.mock_state(hass, ConfigEntryState.SETUP_RETRY)
+    info = _tdp(f"id-{STUB_MAC}", ip="10.0.0.9", scheme=reply)
+    with _by_host({"10.0.0.9": info}):
+        state = await coord._async_update_data()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert state.host_updates == ()
+    assert tp.data["host"] == "10.0.0.1"
+    assert stub.dhcp_infos == []
+    flows = hass.config_entries.flow.async_progress_by_handler("tapo_onboard")
+    assert [f["context"]["unique_id"] for f in flows] == [f"moved-{STUB_MAC}-10.0.0.9"]
+    assert flows[0]["step_id"] == "moved_confirm"
+
+
+@pytest.mark.parametrize(
+    "info",
+    [
+        _tdp("x", ip="10.0.0.1", scheme="KLAP"),  # right host, wrong MAC below
+        _tdp("x", ip="10.0.0.7", scheme="KLAP"),  # wrong ip
+        None,
+    ],
+)
+async def test_healthy_probe_records_only_matching(
+    hass: HomeAssistant,
+    mod: ModuleType,
+    stub: type[StubTplinkFlow],
+    info: TdpInfo | None,
+) -> None:
+    tp = _tplink(hass, ConfigEntryState.LOADED)
+    client = FakeCloudClient([_device(STUB_MAC)], {STUB_MAC: "10.0.0.9"})
+    coord = _coord(mod, hass, _entry(hass), client)
+    if info is not None and info.ip == "10.0.0.1":
+        info = _tdp("x", MAC2, ip="10.0.0.1", scheme="KLAP")
+    with _by_host({tp.data["host"]: info}):
+        await coord.async_refresh()
+    assert coord._schemes == {}
+    assert client.details_calls == []
+
+
+async def test_healthy_probe_once_per_run_and_no_extra_cloud_calls(
+    hass: HomeAssistant, mod: ModuleType, stub: type[StubTplinkFlow]
+) -> None:
+    tp = _tplink(hass, ConfigEntryState.LOADED)
+    client = FakeCloudClient([_device(STUB_MAC)], {STUB_MAC: "10.0.0.9"})
+    coord = _coord(mod, hass, _entry(hass), client)
+    probed: list[str] = []
+
+    async def _fake(host: str, *, query: bytes, **_: object) -> TdpInfo | None:
+        probed.append(host)
+        return _tdp(f"id-{STUB_MAC}", ip=host, scheme="KLAP")
+
+    with patch("custom_components.tapo_onboard.onboarding.async_probe", _fake):
+        await coord.async_refresh()
+        await coord.async_refresh()
+    assert probed == [tp.data["host"]]
+    assert coord._schemes == {format_mac(STUB_MAC): "KLAP"}
+    assert client.list_calls == 2
+    assert client.details_calls == []
+    assert client.refresh_calls == 0
+
+
+async def test_healthy_probe_exception_does_not_fail_cycle(
+    hass: HomeAssistant, mod: ModuleType, stub: type[StubTplinkFlow]
+) -> None:
+    _tplink(hass, ConfigEntryState.LOADED)
+    client = FakeCloudClient([_device(STUB_MAC)], {STUB_MAC: "10.0.0.9"})
+    coord = _coord(mod, hass, _entry(hass), client)
+
+    async def _boom(host: str, *, query: bytes, **_: object) -> TdpInfo | None:
+        raise RuntimeError("socket exploded")
+
+    with patch("custom_components.tapo_onboard.onboarding.async_probe", _boom):
+        await coord.async_refresh()
+    assert coord.last_update_success
+    assert coord._schemes == {}
 
 
 @pytest.mark.parametrize("info", [_tdp("other-device"), None])

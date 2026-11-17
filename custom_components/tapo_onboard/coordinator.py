@@ -14,14 +14,14 @@ to `DETAILS_BACKOFF_MAX`.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from homeassistant.config_entries import ConfigEntry, ConfigEntryState
-from homeassistant.const import STATE_UNAVAILABLE
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.device_registry import format_mac
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 from tapolink_proto.cloud import (
@@ -49,22 +49,15 @@ from .const import (
     UNSUPPORTED_IN_CORE_MODELS,
 )
 from .onboarding import (
+    TERMINAL_OUTCOMES,
     IdentityResult,
+    MovedCards,
     OnboardOutcome,
     async_hand_off_if_verified,
     async_onboard_device,
+    async_probe_info,
     async_tplink_entry_for_mac,
-)
-
-_BROKEN_STATES = frozenset({ConfigEntryState.SETUP_RETRY, ConfigEntryState.SETUP_ERROR})
-_TERMINAL = frozenset(
-    {
-        OnboardOutcome.ADDED,
-        OnboardOutcome.ALREADY_CONFIGURED,
-        OnboardOutcome.HANDED_TO_USER,
-        OnboardOutcome.AUTH_FAILED,
-        OnboardOutcome.IDENTITY_MISMATCH,
-    }
+    is_lost,
 )
 
 
@@ -120,7 +113,7 @@ class InventoryCoordinator(DataUpdateCoordinator[InventoryState]):
         self._seed: dict[str, CloudDevice] | None = None
         if flow_result is not None:
             self._attempted.update(
-                mac for mac, o in flow_result.outcomes.items() if o in _TERMINAL
+                mac for mac, o in flow_result.outcomes.items() if o in TERMINAL_OUTCOMES
             )
             self._details_not_before.update(
                 (mac, at + DETAILS_FLOOR) for mac, at in flow_result.details_at.items()
@@ -132,6 +125,10 @@ class InventoryCoordinator(DataUpdateCoordinator[InventoryState]):
                 self._seed = {d.mac: d for d in flow_result.devices}
         self._reauth_started = False
         self._session = self._session_from_entry()
+        # MAC -> scheme seen while the device was healthy at its known host
+        # (memory only, once per HA run).
+        self._schemes: dict[str, str | None] = {}
+        self._cards = MovedCards(INVENTORY_INTERVAL)
 
     def _session_from_entry(self) -> CloudSession:
         data = self._entry.data
@@ -171,32 +168,6 @@ class InventoryCoordinator(DataUpdateCoordinator[InventoryState]):
                 return await call(self._session)
         except (TokenExpired, CloudAuthError) as exc:
             raise self._start_reauth() from exc
-
-    def _is_lost(self, tplink_entry: ConfigEntry) -> bool:
-        """Return True when the `tplink` entry cannot reach its device.
-
-        Failed setup counts as lost. A loaded entry is lost when it has enabled
-        entities and every one of them is unavailable (device moved or off).
-        """
-        if tplink_entry.state in _BROKEN_STATES:
-            return True
-        if tplink_entry.state is not ConfigEntryState.LOADED:
-            return False
-        registry = er.async_get(self.hass)
-        entity_ids = [
-            ent.entity_id
-            for ent in er.async_entries_for_config_entry(
-                registry, tplink_entry.entry_id
-            )
-            if ent.disabled_by is None
-        ]
-        if not entity_ids:
-            return False
-        for entity_id in entity_ids:
-            state = self.hass.states.get(entity_id)
-            if state is None or state.state != STATE_UNAVAILABLE:
-                return False
-        return True
 
     def _details_due(self, mac: str) -> bool:
         """True once the floor (or backoff) since this device's last call passed.
@@ -255,7 +226,35 @@ class InventoryCoordinator(DataUpdateCoordinator[InventoryState]):
                 translation_domain=DOMAIN, translation_key="cloud_unavailable"
             ) from exc
 
+    async def _record_healthy_schemes(self, devices: Mapping[str, CloudDevice]) -> None:
+        """Probe each healthy entry's host once per run and record its scheme.
+
+        Unicast UDP only: no cloud call. Recorded only when the reply is from
+        the same MAC at the entry's own host.
+        """
+        targets: dict[str, str] = {}
+        for mac in devices:
+            key = format_mac(mac)
+            if key in self._schemes:
+                continue
+            tplink_entry = async_tplink_entry_for_mac(self.hass, mac)
+            if tplink_entry is None or is_lost(self.hass, tplink_entry):
+                continue
+            host = tplink_entry.data.get("host")
+            if isinstance(host, str):
+                targets[key] = host
+        if not targets:
+            return
+        infos = await asyncio.gather(
+            *(async_probe_info(self.hass, host) for host in targets.values())
+        )
+        for (key, host), info in zip(targets.items(), infos, strict=True):
+            if info is not None and info.matches_mac(key) and info.ip == host:
+                self._schemes[key] = (info.encrypt_type or "").upper() or None
+
     async def _process(self, devices: dict[str, CloudDevice]) -> InventoryState:
+        self._cards.prune(self.hass)
+        await self._record_healthy_schemes(devices)
         outcomes: dict[str, OnboardOutcome] = {}
         host_updates: list[str] = []
         ignored = set(self._entry.data.get(CONF_IGNORED_MACS, []))
@@ -265,7 +264,7 @@ class InventoryCoordinator(DataUpdateCoordinator[InventoryState]):
             if tplink_entry is not None:
                 # Case (a): IP repair for lost entries. Core rewrites the host
                 # and reloads for both loaded and setup-retry/error entries.
-                if not self._is_lost(tplink_entry):
+                if not is_lost(self.hass, tplink_entry):
                     self._failures.pop(mac, None)
                     continue
                 if not self._details_due(mac):
@@ -274,6 +273,26 @@ class InventoryCoordinator(DataUpdateCoordinator[InventoryState]):
                 ip = details.ip if details is not None else None
                 if not ip or ip == tplink_entry.data.get("host"):
                     # Offline in the cloud, or still at the same address.
+                    self._settle(mac, progressed=False)
+                    continue
+                # Unattended re-point only when it used KLAP while healthy and
+                # still answers KLAP; anything else asks the user first.
+                if self._schemes.get(format_mac(mac)) == "KLAP":
+                    reply = await async_probe_info(self.hass, ip)
+                    klap = reply is not None and (
+                        (reply.encrypt_type or "").upper() == "KLAP"
+                    )
+                else:
+                    klap = False
+                if not klap:
+                    self._cards.async_offer(
+                        self.hass,
+                        mac=mac,
+                        ip=ip,
+                        model=device.model,
+                        entry_id=self._entry.entry_id,
+                        device_id=device.device_id,
+                    )
                     self._settle(mac, progressed=False)
                     continue
                 identity = await async_hand_off_if_verified(
@@ -312,9 +331,9 @@ class InventoryCoordinator(DataUpdateCoordinator[InventoryState]):
                 except Exception as exc:  # noqa: BLE001 - isolate one device
                     LOGGER.debug("onboarding %s failed: %s", mac, type(exc).__name__)
                     outcomes[mac] = OnboardOutcome.CANNOT_CONNECT
-                if outcomes[mac] in _TERMINAL:
+                if outcomes[mac] in TERMINAL_OUTCOMES:
                     self._attempted.add(mac)
-                self._settle(mac, progressed=outcomes[mac] in _TERMINAL)
+                self._settle(mac, progressed=outcomes[mac] in TERMINAL_OUTCOMES)
             else:
                 identity = await async_hand_off_if_verified(
                     self.hass, host=details.ip, mac=mac, device_id=device.device_id
