@@ -215,9 +215,9 @@ failures, so pick one per device.
 
 - **Moved devices.** The KLAP rule applies in local mode and cloud mode: a device that
   changed address is updated automatically only if it used KLAP while it was healthy
-  and still answers KLAP (which proves the device knows your credentials before anything is sent). In
-  every other case, including a device lost before it was seen healthy, a "moved"
-  card asks you first. A host faking a moved KLAP device can make that entry need
+  and still answers KLAP (which proves the device knows your credentials before
+  anything is sent). In every other case, including a device lost before it was seen
+  healthy, a "moved" card asks you first. A host faking a moved KLAP device can make that entry need
   re-authentication, but learns no secret.
 - **New devices in cloud mode are added automatically.** Cloud mode sends your password
   to the cloud-listed IP after a probe that only proves the reply came from that IP.
